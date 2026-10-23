@@ -35,7 +35,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+
+// CORS: the API is called same-origin when Vercel rewrites /api/* to this backend, but if a
+// standalone subdomain is used instead, the browser needs CORS. Reflect the requesting origin
+// so one backend can serve both setups without hard-coding domains.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 // Long invoices ship many rasterised pages at once. A multi-page PDF can easily produce
 // tens of MB of base64; allow a generous ceiling (but keep one to avoid unbounded memory).
@@ -1432,8 +1447,8 @@ async function startServer() {
     res.status(status).json({ error: err?.message || 'Internal server error' });
   });
 
-  app.listen(PORT, '127.0.0.1', () => {
-    console.log(`SpendPulse server ready at http://127.0.0.1:${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`SpendPulse server ready on 0.0.0.0:${PORT}`);
   });
 }
 
