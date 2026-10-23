@@ -37,9 +37,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-// Long invoices ship many rasterised pages at once - keep enough headroom for 40+ pages.
-app.use(express.json({ limit: '150mb' }));
-app.use(express.urlencoded({ extended: true, limit: '150mb' }));
+// Long invoices ship many rasterised pages at once. A multi-page PDF can easily produce
+// tens of MB of base64; allow a generous ceiling (but keep one to avoid unbounded memory).
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
 /**
  * Order-insensitive fingerprint of the uploaded pages, so re-importing the same statement
@@ -1419,6 +1420,17 @@ async function startServer() {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
+
+  // Global JSON error handler. An error thrown OUTSIDE a route's own try/catch - most
+  // commonly `express.json` rejecting an oversized body - would otherwise reach Express's
+  // default HTML error page. The browser then fails to JSON.parse it and the UI only ever
+  // shows a bare "OCR failed". Always answer with JSON so the real cause is visible.
+  app.use((err: any, _req: any, res: any, _next: any) => {
+    if (res.headersSent) return _next(err);
+    const status = err?.status || err?.statusCode || 500;
+    console.error('[Unhandled error]', err);
+    res.status(status).json({ error: err?.message || 'Internal server error' });
+  });
 
   app.listen(PORT, '127.0.0.1', () => {
     console.log(`SpendPulse server ready at http://127.0.0.1:${PORT}`);

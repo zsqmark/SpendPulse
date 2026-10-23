@@ -206,7 +206,13 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
           }),
         });
 
-        const payload = await response.json().catch(() => ({}));
+        const rawText = await response.text();
+        let payload: any = {};
+        try {
+          payload = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          // Non-JSON body (e.g. an HTML error page from an unhandled server error).
+        }
 
         if (response.status === 409 && payload.duplicate) {
           // Already imported - not an error, just nothing new to add.
@@ -219,7 +225,10 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
         }
 
         if (!response.ok) {
-          failures.push(`${docName}: ${payload.error || 'OCR failed'}`);
+          const detail =
+            payload.error ||
+            `server responded ${response.status} (non-JSON body)${rawText ? ': ' + rawText.slice(0, 200) : ''}`;
+          failures.push(`${docName}: ${detail}`);
           continue;
         }
 
