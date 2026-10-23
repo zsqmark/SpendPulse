@@ -756,3 +756,126 @@ CRITICAL MULTI-PAGE EXTRACTION MANDATE (MANDATORY):
     }. Please wait a few seconds and retry.`
   );
 }
+
+/**
+ * Detects whether a set of page-images belongs to ONE invoice or SEVERAL, and groups the
+ * pages into separate invoices. This is what lets one uploaded PDF that actually contains
+ * multiple statements produce several invoice records instead of one merged, mis-attributed
+ * one.
+ *
+ * Returns an array of page-groups. A single group (the common case) means "one invoice" and
+ * downstream behaviour is unchanged. On any failure it falls back to a single group so the
+ * pipeline never breaks.
+ */
+export async function segmentPagesIntoInvoices(
+  pages: DocumentPage[]
+): Promise<DocumentPage[][]> {
+  if (!pages || pages.length <= 1) {
+    return [pages || []];
+  }
+
+  // Only segment when every page is an image we can show the model. A raw-PDF / mixed input
+  // is left as one invoice rather than guessing boundaries from non-image data.
+  if (!pages.every((p) => p.mimeType !== 'application/pdf')) {
+    return [pages];
+  }
+
+  const parts: LlmMessage['parts'] = [
+    {
+      type: 'text',
+      text: `These ${pages.length} page images may contain ONE or SEVERAL separate invoices, statements, or delivery dockets, possibly from different vendors.
+
+Group the pages by which invoice they belong to. Invoices are usually separated by a new vendor / supplier header, a new invoice number, or a page that begins with a tax / summary / "amount due" totals block.
+
+Pages are labelled PAGE 1, PAGE 2, ... in order. Return JSON with a "groups" array: one object per invoice, each with "pageNumbers" - a sorted array of the 1-based page numbers in that invoice. Every page must appear in EXACTLY one group, with no gaps and no overlaps. If it is a single multi-page invoice, return one group containing all pages.`,
+    },
+  ];
+
+  pages.forEach((p, idx) => {
+    parts.push({ type: 'text', text: `\n----- PAGE ${idx + 1} OF ${pages.length} -----` });
+    parts.push({ type: 'image', base64: p.base64Data, mimeType: p.mimeType });
+  });
+
+  const schema = {
+    type: Type.OBJECT,
+    properties: {
+      groups: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            pageNumbers: { type: Type.ARRAY, items: { type: Type.INTEGER } },
+          },
+          required: ['pageNumbers'],
+        },
+      },
+    },
+    required: ['groups'],
+  };
+
+  try {
+    const raw = await generateText({
+      messages: [{ role: 'user', parts }],
+      modelKind: 'vision',
+      maxOutputTokens: 2048,
+      json: { schema, name: 'invoice_segmentation' },
+    });
+    const parsed = parseJsonLoose<any>(raw);
+    if (Array.isArray(parsed?.groups) && parsed.groups.length > 0) {
+      const byPage = new Map<number, DocumentPage>();
+      pages.forEach((p, idx) => byPage.set(idx + 1, p));
+      const selected: DocumentPage[][] = [];
+      const used = new Set<number>();
+      let overlap = false;
+      for (const g of parsed.groups) {
+        const nums: number[] = Array.isArray(g?.pageNumbers) ? g.pageNumbers : [];
+        const sel: DocumentPage[] = [];
+        for (const n of nums) {
+          if (byPage.has(n)) {
+            if (used.has(n)) overlap = true;
+            used.add(n);
+            sel.push(byPage.get(n)!);
+          }
+        }
+        if (sel.length > 0) selected.push(sel);
+      }
+      // Safety: if the model dropped, duplicated, or overlapped any page, trust the split
+      // only when it accounts for every page exactly once.
+      if (!overlap && selected.length >= 1 && used.size === pages.length) {
+        return selected;
+      }
+    }
+  } catch (err: any) {
+    console.warn('[OCR] Segmentation failed, treating document as one invoice:', err?.message);
+  }
+  return [pages];
+}
+
+/**
+ * End-to-end extraction that supports MULTIPLE invoices inside one uploaded document.
+ * Segments the supplied page-images into invoice groups, then runs the normal single-invoice
+ * extraction on each. Returns one result per detected invoice.
+ */
+export async function extractInvoicesFromDocument(params: {
+  base64Data?: string;
+  mimeType?: string;
+  textPayload?: string;
+  fileName?: string;
+  pages?: DocumentPage[];
+}): Promise<{ result: ExtractedInvoiceResult; pages: DocumentPage[] }[]> {
+  // The normal Scan dialog path hands us rasterised page-images - segment those.
+  if (params.pages && params.pages.length > 0) {
+    const groups = await segmentPagesIntoInvoices(params.pages);
+    const out: { result: ExtractedInvoiceResult; pages: DocumentPage[] }[] = [];
+    for (const group of groups) {
+      const result = await extractInvoiceData({ pages: group, fileName: params.fileName });
+      result.pageCount = group.length;
+      out.push({ result, pages: group });
+    }
+    return out;
+  }
+
+  // Raw base64Data / textPayload: nothing to segment - single invoice.
+  const single = await extractInvoiceData(params);
+  return [{ result: single, pages: [] }];
+}

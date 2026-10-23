@@ -224,6 +224,18 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
         }
 
         results.push(payload);
+
+        // Per-invoice duplicates (e.g. one statement inside a multi-invoice PDF that was
+        // already stored) arrive inside the 200 payload - surface them alongside the
+        // document-level skips so the user sees exactly what was skipped.
+        if (Array.isArray(payload.duplicates)) {
+          for (const d of payload.duplicates) {
+            duplicates.push({
+              fileName: d.fileName || docName,
+              existingInvoice: d,
+            });
+          }
+        }
       }
 
       if (results.length === 0 && duplicates.length === 0) {
@@ -232,14 +244,20 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
 
       setCurrentStep('Reconciling line items across all pages into Master Catalog...');
 
-      const totalItems = results.reduce((sum, r) => sum + (r.invoice?.itemCount || 0), 0);
+      // Flatten every invoice across all documents - a single uploaded PDF may now
+      // resolve into several invoices (one per detected statement), so we collect each
+      // document's `invoices` array rather than just its single primary `invoice`.
+      const allInvoices = results.flatMap((r) =>
+        Array.isArray(r.invoices) && r.invoices.length > 0 ? r.invoices : [r.invoice]
+      );
+      const totalItems = allInvoices.reduce((sum, inv) => sum + (inv?.itemCount || 0), 0);
       const vendors = Array.from(
-        new Set(results.map((r) => r.invoice?.vendorName).filter(Boolean))
+        new Set(allInvoices.map((inv) => inv?.vendorName).filter(Boolean))
       );
 
       setExtractedResult({
         ...(results[results.length - 1] ?? {}),
-        invoices: results.map((r) => r.invoice),
+        invoices: allInvoices,
         documentsProcessed: results.length,
         totalItems,
         vendors,
@@ -449,7 +467,10 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
                       <div className="p-2.5 rounded bg-slate-900 border border-slate-800 space-y-1.5">
                         <div className="flex items-center justify-between">
                           <span className="text-slate-300 font-semibold">
-                            {extractedResult.documentsProcessed} invoices created
+                            {(extractedResult.invoices || []).length} invoice{(extractedResult.invoices || []).length === 1 ? '' : 's'} created
+                            {extractedResult.documentsProcessed !== (extractedResult.invoices || []).length
+                              ? ` (from ${extractedResult.documentsProcessed} document${(extractedResult.invoices || []).length === 1 ? '' : 's'})`
+                              : ''}
                           </span>
                           <span className="text-slate-500 font-mono text-[10px]">
                             {extractedResult.totalItems} line items total

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { db } from './src/server/storage.ts';
-import { extractInvoiceData, mergeDuplicateLineItems } from './src/server/ocrService.ts';
+import { mergeDuplicateLineItems, extractInvoicesFromDocument } from './src/server/ocrService.ts';
 import { batchMatchItems } from './src/server/aliasMatcher.ts';
 import {
   checkAndRecordPriceChange,
@@ -140,8 +140,10 @@ app.post('/api/invoices/process', async (req, res) => {
       }
     }
 
-    // Step 1: Multimodal OCR extraction via DeepSeek Vision
-    const extracted = await extractInvoiceData({
+    // Step 1: Multimodal OCR extraction. A single uploaded document (e.g. a combined
+    // statement PDF) may actually contain SEVERAL invoices. We segment the page-images
+    // into invoice groups, then process each group as its own invoice record.
+    const extractedGroups = await extractInvoicesFromDocument({
       base64Data,
       mimeType,
       textPayload,
@@ -149,181 +151,194 @@ app.post('/api/invoices/process', async (req, res) => {
       pages,
     });
 
-    // Clean the supplier name before it is stored or used for dedupe, so "T & D TRADING
-    // PTY. LTD." and "T & D Trading Pty. Ltd." collapse to one identity going forward.
-    if (extracted.vendorName) {
-      extracted.vendorName = normalizeVendorName(extracted.vendorName);
-    }
-
-    // Guard 2: the same supplier + invoice number + date, e.g. re-uploading one page of a
-    // statement that is already stored. Catches duplicates the file hash cannot see.
-    if (extracted.invoiceNumber && !extracted.invoiceNumber.startsWith('INV-')) {
-      const sameInvoice = db.getInvoices().find(
-        (i) =>
-          i.vendorName === extracted.vendorName &&
-          i.invoiceNumber === extracted.invoiceNumber &&
-          i.invoiceDate === extracted.invoiceDate
-      );
-      if (sameInvoice) {
-        console.log(
-          `[Dedupe] Invoice ${extracted.invoiceNumber} from ${extracted.vendorName} already stored - skipping.`
-        );
-        return res.status(409).json({
-          error: `Invoice "${extracted.invoiceNumber}" from ${extracted.vendorName} is already imported. Skipped to avoid a duplicate.`,
-          duplicate: true,
-          reason: 'same_invoice_number',
-          existingInvoice: invoiceSummary(sameInvoice),
-        });
-      }
-    }
-
-    // Group repeated rows of the same product before matching, so identical lines
-    // (very common across the pages of a long statement) become one catalogue entry.
-    const groupedItems = mergeDuplicateLineItems(extracted.items);
-
-    const invoiceId = `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const invoices: Invoice[] = [];
     const alertsCreated: PriceAlert[] = [];
-    const processedItems: InvoiceItem[] = [];
+    const duplicateSummaries: any[] = [];
+    let needsReview = false;
 
-    let hasUnmappedItems = false;
-    /** Products already priced in this invoice - later rows of the same invoice never alert. */
-    const pricedInThisInvoice = new Set<string>();
-
-    // Prepare line items for single batch matching with multi-tier SKU & pack size
-    const rawItemsForBatch = groupedItems.map((it, idx) => ({
-      id: `item-${Date.now()}-${idx}`,
-      rawDescription: it.rawDescription,
-      supplierSku: it.supplierSku,
-      brand: it.brand,
-      packSize: it.packSize,
-      unit: it.unit,
-      unitPrice: it.unitPrice,
-      quantity: it.quantity,
-      totalPrice: it.totalPrice,
-      pageNumber: it.pageNumber || 1,
-      mergedCount: it.mergedCount || 1,
-    }));
-
-    const productsBefore = new Set(db.getMasterProducts().map((p) => p.id));
-    const batchMatches = await batchMatchItems(rawItemsForBatch, extracted.vendorName);
-    // Products created here were seeded from this invoice - they cannot alert against it.
-    for (const p of db.getMasterProducts()) {
-      if (!productsBefore.has(p.id)) pricedInThisInvoice.add(p.id);
-    }
-
-    // Step 2: Canonicalize each line item & check price change
-    for (const it of rawItemsForBatch) {
-      const match = batchMatches[it.id] || {
-        masterProductId: null,
-        masterProductName: null,
-        confidence: 0,
-        matchTier: 'rule_pack_match' as const,
-        needsMappingReview: true,
-        reasoning: 'Unmapped',
-        confidenceBreakdown: { skuMatch: false, packMatch: false, nameScore: 0 },
-      };
-
-      let priceCheck: any = {
-        hasPriceIncrease: false,
-        previousPrice: null,
-        deltaAmount: null,
-        percentChange: null,
-        baseUnitPrice: null,
-        baseUnit: null,
-        comparable: false,
-      };
-
-      if (match.masterProductId && !match.needsMappingReview) {
-        priceCheck = checkAndRecordPriceChange({
-          masterProductId: match.masterProductId,
-          unitPrice: it.unitPrice,
-          unit: it.unit,
-          packSize: it.packSize,
-          vendorName: extracted.vendorName,
-          invoiceId,
-          invoiceNumber: extracted.invoiceNumber,
-          invoiceDate: extracted.invoiceDate,
-          suppressAlert: pricedInThisInvoice.has(match.masterProductId),
-        });
-        pricedInThisInvoice.add(match.masterProductId);
-
-        if (priceCheck.alertCreated) {
-          alertsCreated.push(priceCheck.alertCreated);
-        }
-      } else if (!match.isNonProduct) {
-        // Fees/surcharges are not products - they must not put the invoice into review.
-        hasUnmappedItems = true;
+    for (const { result: extracted, pages: groupPages } of extractedGroups) {
+      // Clean the supplier name before it is stored or used for dedupe, so "T & D TRADING
+      // PTY. LTD." and "T & D Trading Pty. Ltd." collapse to one identity going forward.
+      if (extracted.vendorName) {
+        extracted.vendorName = normalizeVendorName(extracted.vendorName);
       }
 
-      processedItems.push({
-        id: it.id,
+      // Guard 2: the same supplier + invoice number + date, e.g. re-uploading a statement
+      // that is already stored. Within a multi-invoice document we skip just this invoice
+      // (recording it as a duplicate) rather than aborting the whole import.
+      if (extracted.invoiceNumber && !extracted.invoiceNumber.startsWith('INV-')) {
+        const sameInvoice = db.getInvoices().find(
+          (i) =>
+            i.vendorName === extracted.vendorName &&
+            i.invoiceNumber === extracted.invoiceNumber &&
+            i.invoiceDate === extracted.invoiceDate
+        );
+        if (sameInvoice) {
+          console.log(
+            `[Dedupe] Invoice ${extracted.invoiceNumber} from ${extracted.vendorName} already stored - skipping.`
+          );
+          duplicateSummaries.push(invoiceSummary(sameInvoice));
+          continue;
+        }
+      }
+
+      // Group repeated rows of the same product before matching, so identical lines
+      // (very common across the pages of a long statement) become one catalogue entry.
+      const groupedItems = mergeDuplicateLineItems(extracted.items);
+
+      const invoiceId = `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const processedItems: InvoiceItem[] = [];
+
+      let hasUnmappedItems = false;
+      /** Products already priced in this invoice - later rows of the same invoice never alert. */
+      const pricedInThisInvoice = new Set<string>();
+
+      // Prepare line items for single batch matching with multi-tier SKU & pack size
+      const rawItemsForBatch = groupedItems.map((it, idx) => ({
+        id: `item-${Date.now()}-${idx}`,
         rawDescription: it.rawDescription,
         supplierSku: it.supplierSku,
         brand: it.brand,
         packSize: it.packSize,
-        masterProductId: match.needsMappingReview ? null : match.masterProductId,
-        masterProductName: match.needsMappingReview ? null : match.masterProductName,
-        quantity: it.quantity,
         unit: it.unit,
         unitPrice: it.unitPrice,
+        quantity: it.quantity,
         totalPrice: it.totalPrice,
-        previousPrice: priceCheck.previousPrice,
-        priceDelta: priceCheck.deltaAmount,
-        priceDeltaPercent: priceCheck.percentChange,
-        baseUnitPrice: priceCheck.baseUnitPrice,
-        baseUnit: priceCheck.baseUnit,
-        priceComparable: priceCheck.comparable,
-        matchConfidence: match.confidence,
-        matchTier: match.matchTier,
-        needsMappingReview: match.needsMappingReview,
-        suggestedMasterId: match.masterProductId,
-        suggestedMasterName: match.masterProductName,
-        confidenceBreakdown: match.confidenceBreakdown,
-        pageNumber: it.pageNumber,
-        mergedCount: it.mergedCount,
-      });
+        pageNumber: it.pageNumber || 1,
+        mergedCount: it.mergedCount || 1,
+      }));
+
+      const productsBefore = new Set(db.getMasterProducts().map((p) => p.id));
+      const batchMatches = await batchMatchItems(rawItemsForBatch, extracted.vendorName);
+      // Products created here were seeded from this invoice - they cannot alert against it.
+      for (const p of db.getMasterProducts()) {
+        if (!productsBefore.has(p.id)) pricedInThisInvoice.add(p.id);
+      }
+
+      // Step 2: Canonicalize each line item & check price change
+      for (const it of rawItemsForBatch) {
+        const match = batchMatches[it.id] || {
+          masterProductId: null,
+          masterProductName: null,
+          confidence: 0,
+          matchTier: 'rule_pack_match' as const,
+          needsMappingReview: true,
+          reasoning: 'Unmapped',
+          confidenceBreakdown: { skuMatch: false, packMatch: false, nameScore: 0 },
+        };
+
+        let priceCheck: any = {
+          hasPriceIncrease: false,
+          previousPrice: null,
+          deltaAmount: null,
+          percentChange: null,
+          baseUnitPrice: null,
+          baseUnit: null,
+          comparable: false,
+        };
+
+        if (match.masterProductId && !match.needsMappingReview) {
+          priceCheck = checkAndRecordPriceChange({
+            masterProductId: match.masterProductId,
+            unitPrice: it.unitPrice,
+            unit: it.unit,
+            packSize: it.packSize,
+            vendorName: extracted.vendorName,
+            invoiceId,
+            invoiceNumber: extracted.invoiceNumber,
+            invoiceDate: extracted.invoiceDate,
+            suppressAlert: pricedInThisInvoice.has(match.masterProductId),
+          });
+          pricedInThisInvoice.add(match.masterProductId);
+
+          if (priceCheck.alertCreated) {
+            alertsCreated.push(priceCheck.alertCreated);
+          }
+        } else if (!match.isNonProduct) {
+          // Fees/surcharges are not products - they must not put the invoice into review.
+          hasUnmappedItems = true;
+        }
+
+        processedItems.push({
+          id: it.id,
+          rawDescription: it.rawDescription,
+          supplierSku: it.supplierSku,
+          brand: it.brand,
+          packSize: it.packSize,
+          masterProductId: match.needsMappingReview ? null : match.masterProductId,
+          masterProductName: match.needsMappingReview ? null : match.masterProductName,
+          quantity: it.quantity,
+          unit: it.unit,
+          unitPrice: it.unitPrice,
+          totalPrice: it.totalPrice,
+          previousPrice: priceCheck.previousPrice,
+          priceDelta: priceCheck.deltaAmount,
+          priceDeltaPercent: priceCheck.percentChange,
+          baseUnitPrice: priceCheck.baseUnitPrice,
+          baseUnit: priceCheck.baseUnit,
+          priceComparable: priceCheck.comparable,
+          matchConfidence: match.confidence,
+          matchTier: match.matchTier,
+          needsMappingReview: match.needsMappingReview,
+          suggestedMasterId: match.masterProductId,
+          suggestedMasterName: match.masterProductName,
+          confidenceBreakdown: match.confidenceBreakdown,
+          pageNumber: it.pageNumber,
+          mergedCount: it.mergedCount,
+        });
+      }
+
+      const newInvoice: Invoice = {
+        id: invoiceId,
+        fileName: fileName || `Invoice_${extracted.invoiceNumber}.pdf`,
+        vendorName: extracted.vendorName,
+        invoiceNumber: extracted.invoiceNumber,
+        invoiceDate: extracted.invoiceDate,
+        dueDate: extracted.dueDate,
+        subtotal: extracted.subtotal,
+        taxAmount: extracted.taxAmount,
+        totalAmount: extracted.totalAmount,
+        currency: extracted.currency || 'USD',
+        status: hasUnmappedItems ? 'needs_review' : 'processed',
+        items: processedItems,
+        itemCount: processedItems.length,
+        pageCount: extracted.pageCount || 1,
+        notes: extracted.notes,
+        isScanned: isScannedManual ?? extracted.isScanned,
+        createdAt: new Date().toISOString(),
+        contentHash: contentHash || undefined,
+      };
+
+      // Keep the source pages on disk so the extraction can be audited against the scan.
+      // For a multi-invoice document, archive only the pages that belong to THIS invoice.
+      try {
+        await saveInvoicePages(
+          invoiceId,
+          groupPages && groupPages.length > 0
+            ? groupPages
+            : [{ base64Data, mimeType, pageNumber: 1 }]
+        );
+        newInvoice.documentPages = await listInvoicePages(invoiceId);
+      } catch (docErr: any) {
+        // Never fail an otherwise successful OCR run just because archiving failed.
+        console.warn(`[Documents] Could not archive source pages for ${invoiceId}: ${docErr.message}`);
+      }
+
+      db.addInvoice(newInvoice);
+      invoices.push(newInvoice);
+      if (hasUnmappedItems) needsReview = true;
     }
 
-    const newInvoice: Invoice = {
-      id: invoiceId,
-      fileName: fileName || `Invoice_${extracted.invoiceNumber}.pdf`,
-      vendorName: extracted.vendorName,
-      invoiceNumber: extracted.invoiceNumber,
-      invoiceDate: extracted.invoiceDate,
-      dueDate: extracted.dueDate,
-      subtotal: extracted.subtotal,
-      taxAmount: extracted.taxAmount,
-      totalAmount: extracted.totalAmount,
-      currency: extracted.currency || 'USD',
-      status: hasUnmappedItems ? 'needs_review' : 'processed',
-      items: processedItems,
-      itemCount: processedItems.length,
-      pageCount: extracted.pageCount || 1,
-      notes: extracted.notes,
-      isScanned: isScannedManual ?? extracted.isScanned,
-      createdAt: new Date().toISOString(),
-      contentHash: contentHash || undefined,
-    };
-
-    // Keep the source pages on disk so the extraction can be audited against the scan.
-    try {
-      await saveInvoicePages(
-        invoiceId,
-        Array.isArray(pages) && pages.length > 0 ? pages : [{ base64Data, mimeType, pageNumber: 1 }]
-      );
-      newInvoice.documentPages = await listInvoicePages(invoiceId);
-    } catch (docErr: any) {
-      // Never fail an otherwise successful OCR run just because archiving failed.
-      console.warn(`[Documents] Could not archive source pages for ${invoiceId}: ${docErr.message}`);
-    }
-
-    db.addInvoice(newInvoice);
+    const primaryInvoice = invoices[0] || null;
 
     res.json({
       success: true,
-      invoice: newInvoice,
+      invoices,
+      invoice: primaryInvoice,
+      invoicesCount: invoices.length,
       alertsCreated,
-      needsReview: hasUnmappedItems,
+      duplicates: duplicateSummaries,
+      needsReview,
     });
   } catch (err: any) {
     console.error('Invoice processing error:', err);
