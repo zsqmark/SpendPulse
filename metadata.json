@@ -1,0 +1,6 @@
+{
+  "name": "SpendPulse - Invoice Monitor & Price Intelligence",
+  "description": "Autonomous invoice folder monitor, multimodal OCR extraction, vendor product normalization, price increase alerting, and predictive procurement AI copilot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
