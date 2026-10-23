@@ -1,12 +1,14 @@
-import * as pdfjs from 'pdfjs-dist';
-import PdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker';
+import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import PdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?worker';
 
-// pdf.js v5 ships an ES-module worker. It MUST be loaded as a *module* worker.
-// The previous setup pointed workerSrc at the `?url` of the .mjs and let pdf.js
-// spin up a classic `new Worker(url)`. A classic worker cannot load an ESM file, so
-// the worker silently failed and pdf.js fell back to a broken fake-worker path that
-// throws "a.toHex is not a function" while parsing ANY pdf (toHex is a worker-only
-// parser internal). Passing a ready module-worker instance via workerPort avoids that.
+// pdf.js v5's modern ESM build keeps the `toHex` compatibility helper ONLY inside its
+// worker bundle and relies on the worker running the PDF parser. When that worker fails
+// to load (or pdf.js falls back to a fake worker on the main thread) EVERY pdf parse
+// throws "a.toHex is not a function" / "r.toHex is not a function" - which is exactly
+// the error we hit. The LEGACY build polyfills `Uint8Array.prototype.toHex` on the main
+// thread, so it works regardless of worker state. We use it for both the API and the
+// worker, and still hand pdf.js a ready module-worker instance via workerPort (Vite's
+// ?worker import) to avoid the classic-vs-module worker mismatch.
 pdfjs.GlobalWorkerOptions.workerPort = new PdfWorker();
 
 export interface RasterizedPdfPage {
