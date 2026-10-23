@@ -1,7 +1,13 @@
 import * as pdfjs from 'pdfjs-dist';
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import PdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker';
 
-pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+// pdf.js v5 ships an ES-module worker. It MUST be loaded as a *module* worker.
+// The previous setup pointed workerSrc at the `?url` of the .mjs and let pdf.js
+// spin up a classic `new Worker(url)`. A classic worker cannot load an ESM file, so
+// the worker silently failed and pdf.js fell back to a broken fake-worker path that
+// throws "a.toHex is not a function" while parsing ANY pdf (toHex is a worker-only
+// parser internal). Passing a ready module-worker instance via workerPort avoids that.
+pdfjs.GlobalWorkerOptions.workerPort = new PdfWorker();
 
 export interface RasterizedPdfPage {
   base64Data: string;
