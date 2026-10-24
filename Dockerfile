@@ -7,7 +7,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN npm run build || true   # vite build -> dist (harmless if frontend already built elsewhere)
+# The frontend is served by Vercel, so this image deliberately does NOT run `vite build`.
+# Skipping it keeps peak build memory low - which matters a lot on small VPS plans where
+# `npm ci` / a Vite build can otherwise be OOM-killed (exit 137).
+# If you ever want THIS container to serve the UI too, add `RUN npm run build` here.
 RUN npm prune --omit=dev    # drop devDeps; tsx stays because it is a dependency
 
 FROM node:22-alpine
