@@ -1,7 +1,11 @@
-# SpendPulse backend via Docker Compose.
-# IMPORTANT: create .env.local (or rename to .env) in this directory first — it holds secrets
-# and is git-ignored, so it is NOT committed. Put your existing values there.
-# The named volume keeps the file-backed DB alive across restarts/rebuilds:
+# SpendPulse backend stack (target: Amazon Lightsail VPS).
+# IMPORTANT: create .env.local in this directory first — it holds secrets and is git-ignored,
+# so it is NOT shipped in the image or the repo. Copy it from your local project.
+#
+# Only Caddy is exposed to the internet (80/443). The app publishes nothing publicly; it is
+# reachable on 127.0.0.1 for local checks, and internally as spendpulse:3000 for Caddy.
+#
+# The named volume keeps the file-backed DB alive across restarts and rebuilds:
 #   data/database.json  +  data/documents  (uploaded invoice page images)
 services:
   spendpulse:
@@ -10,14 +14,30 @@ services:
     container_name: spendpulse
     restart: unless-stopped
     ports:
-      - "3000:3000"   # host:container (bump the left side if 3000 is taken)
+      - "127.0.0.1:3000:3000"   # host-only; internet traffic must come in via Caddy
     env_file:
-      - .env.local    # secrets: DEEPSEEK_API_KEY etc.
+      - .env.local              # secrets: DEEPSEEK_API_KEY etc.
     environment:
       - NODE_ENV=production
       - PORT=3000
     volumes:
-      - spendpulse_data:/app/data   # PERSISTENT storage for invoices + documents
+      - spendpulse_data:/app/data   # PERSISTENT invoices + documents
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"     # required for the HTTP-01 challenge / redirect
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # TLS certificates (must persist)
+      - caddy_config:/config
+    depends_on:
+      - spendpulse
 
 volumes:
   spendpulse_data:
+  caddy_data:
+  caddy_config:

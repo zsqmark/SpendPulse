@@ -9,6 +9,7 @@ import { AIChatCopilot } from './components/AIChatCopilot.tsx';
 import { FolderMonitor } from './components/FolderMonitor.tsx';
 import { ExportModal } from './components/ExportModal.tsx';
 import { ScanModal } from './components/ScanModal.tsx';
+import { apiUrl } from './lib/apiBase.ts';
 import {
   Invoice,
   MasterProduct,
@@ -46,7 +47,7 @@ export default function App() {
 
   // Load all initial data from server
   const safeJson = async (url: string) => {
-    const res = await fetch(url);
+    const res = await fetch(apiUrl(url));
     if (!res.ok) throw new Error(`Request to ${url} failed (${res.status})`);
     return res.json();
   };
@@ -113,7 +114,7 @@ export default function App() {
     newProductData?: any;
   }) => {
     try {
-      const res = await fetch('/api/catalog/map-item', {
+      const res = await fetch(apiUrl('/api/catalog/map-item'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
@@ -128,7 +129,7 @@ export default function App() {
 
   const handleApproveMatch = async (invoiceId: string, itemId: string, masterProductId: string) => {
     try {
-      const res = await fetch('/api/catalog/approve-match', {
+      const res = await fetch(apiUrl('/api/catalog/approve-match'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invoiceId, itemId, masterProductId }),
@@ -143,7 +144,7 @@ export default function App() {
 
   const handleBulkApprove = async (approvals: { invoiceId: string; itemId: string; masterProductId: string }[]) => {
     try {
-      const res = await fetch('/api/catalog/bulk-approve', {
+      const res = await fetch(apiUrl('/api/catalog/bulk-approve'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approvals }),
@@ -158,7 +159,7 @@ export default function App() {
 
   const handleMergeProducts = async (primaryId: string, mergeIds: string[]) => {
     try {
-      const res = await fetch('/api/catalog/merge', {
+      const res = await fetch(apiUrl('/api/catalog/merge'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ primaryId, mergeIds }),
@@ -213,7 +214,7 @@ export default function App() {
 
   const handleRebuildPriceHistory = async () => {
     try {
-      const res = await fetch('/api/catalog/rebuild-price-history', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/catalog/rebuild-price-history'), { method: 'POST' });
       if (res.ok) {
         const result = await res.json();
         await loadData();
@@ -233,7 +234,7 @@ export default function App() {
 
   const handleNormalizeVendors = async () => {
     try {
-      const res = await fetch('/api/vendors/normalize', { method: 'POST' });
+      const res = await fetch(apiUrl('/api/vendors/normalize'), { method: 'POST' });
       if (res.ok) {
         const result = await res.json();
         await loadData();
@@ -248,7 +249,7 @@ export default function App() {
 
   const handleMergeVendors = async (primaryName: string, otherNames: string[]) => {
     try {
-      const res = await fetch('/api/vendors/merge', {
+      const res = await fetch(apiUrl('/api/vendors/merge'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ primaryName, otherNames }),
@@ -270,7 +271,7 @@ export default function App() {
 
   const handleClearAllData = async () => {
     if (confirm('Permanently clear all invoices, catalog records, and price alerts from the database?')) {
-      await fetch('/api/reset-data', { method: 'POST' });
+      await fetch(apiUrl('/api/reset-data'), { method: 'POST' });
       await loadData();
     }
   };

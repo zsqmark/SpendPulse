@@ -13,6 +13,7 @@ import {
   CopyCheck,
 } from 'lucide-react';
 import { rasterizePdfToPages } from '../lib/pdfRasterize.ts';
+import { apiUrl } from '../lib/apiBase.ts';
 import { isImageMime, resolveFileMimeType } from '../lib/fileMime.ts';
 import { documentStem } from '../lib/documentGrouping.ts';
 
@@ -196,7 +197,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
         );
 
         // Renumber pages per document so page numbers stay meaningful.
-        const response = await fetch('/api/invoices/process', {
+        const response = await fetch(apiUrl('/api/invoices/process'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

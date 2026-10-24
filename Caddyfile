@@ -1,0 +1,22 @@
+# SpendPulse backend reverse proxy (Amazon Lightsail).
+# Caddy obtains and renews Let's Encrypt certificates automatically, provided DNS for the
+# hostname points at this instance and ports 80/443 are open in the Lightsail firewall.
+api.malayacorner.com {
+    # Rasterised multi-page invoices are large; raise the body limit well above the default
+    # so big page batches are never rejected in transit.
+    request_body {
+        max_size 600MB
+    }
+
+    # A multi-page OCR run can legitimately take 30-120s (and longer for big statements),
+    # so keep proxy timeouts far above any default.
+    reverse_proxy spendpulse:3000 {
+        transport http {
+            dial_timeout 10s
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+
+    encode gzip
+}

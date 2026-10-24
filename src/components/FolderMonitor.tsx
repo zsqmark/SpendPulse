@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { apiUrl } from '../lib/apiBase.ts';
 import {
   FolderSync,
   Upload,
@@ -165,7 +166,7 @@ export const FolderMonitor: React.FC<FolderMonitorProps> = ({
         if (isPdf) {
           // Image-only providers need rasterised pages; do it in the browser.
           const rendered = await rasterizePdfToPages(file, file.name);
-          const res = await fetch('/api/invoices/process', {
+          const res = await fetch(apiUrl('/api/invoices/process'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -216,7 +217,7 @@ export const FolderMonitor: React.FC<FolderMonitorProps> = ({
       // server cannot read - resolve the real type from the file name.
       const mimeType = resolveFileMimeType(file.name, file.type);
 
-      const res = await fetch('/api/invoices/process', {
+      const res = await fetch(apiUrl('/api/invoices/process'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -314,7 +315,7 @@ export const FolderMonitor: React.FC<FolderMonitorProps> = ({
         p.totalPages = total;
       });
 
-      const res = await fetch('/api/invoices/process', {
+      const res = await fetch(apiUrl('/api/invoices/process'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fileName: label, isScannedManual: true, pages }),

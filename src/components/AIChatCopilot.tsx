@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { apiUrl } from '../lib/apiBase.ts';
 import {
   Sparkles,
   Send,
@@ -76,7 +77,7 @@ As soon as you ingest invoices or connect a folder, you can ask me:
     setIsLoading(true);
 
     try {
-      const res = await fetch('/api/chat/analyze', {
+      const res = await fetch(apiUrl('/api/chat/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
