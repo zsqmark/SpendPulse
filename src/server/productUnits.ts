@@ -19,7 +19,7 @@ import {
   VOLUME_IN_L,
   type BaseUnit,
 } from './unitConversion.ts';
-import { canonicalUnit } from './aliasMatcher.ts';
+import { canonicalUnit, guessCategory, MEAT_CATEGORY } from './aliasMatcher.ts';
 
 /**
  * Teaches a product the hierarchy implied by a pack description.
@@ -83,6 +83,65 @@ export function basePriceFor(
   }
   product.unitConversions[direct.baseUnit] = 1;
   return unitPrice / direct.factor;
+}
+
+/**
+ * Meat is bought by weight, so the only meaningful price is the one per kilogram.
+ *
+ * Meat pack strings are too noisy to rely on ("2KG(6) R/W"), and a line invoiced per
+ * carton or per piece otherwise records a pack price that moves with the pack size
+ * rather than with the market. Wherever the line's total AND its weight can both be
+ * read, the unit price is recomputed as **total / weight** and the unit set to kg, so
+ * every meat line is recorded and compared per kg.
+ *
+ * Unchanged values are returned whenever the weight cannot be established (no total, no
+ * quantity, or a pack description that says nothing about weight) - a line is never
+ * silently mispriced to force a comparison.
+ */
+export function applyWeightPricing(item: {
+  rawDescription?: string | null;
+  brand?: string | null;
+  packSize?: string | null;
+  unit?: string | null;
+  unitPrice?: number | null;
+  quantity?: number | null;
+  totalPrice?: number | null;
+}): { unitPrice: number | null; unit: string | null } {
+  const untouched = { unitPrice: item.unitPrice ?? null, unit: item.unit ?? null };
+  if (!isMeatProduct(`${item.rawDescription ?? ''} ${item.brand ?? ''}`.trim())) return untouched;
+
+  const total = Number(item.totalPrice);
+  const qty = Number(item.quantity);
+  if (!(total > 0) || !(qty > 0)) return untouched;
+
+  const kgPerUnit = kgPerInvoicingUnit(item.unit, item.packSize);
+  if (!(kgPerUnit && kgPerUnit > 0)) return untouched;
+
+  const weightKg = qty * kgPerUnit;
+  if (!(weightKg > 0)) return untouched;
+
+  return { unitPrice: total / weightKg, unit: 'kg' };
+}
+
+/** True for the products whose price only makes sense per kilogram. */
+function isMeatProduct(description: string): boolean {
+  return !!description && guessCategory(description) === MEAT_CATEGORY;
+}
+
+/** How many kilograms one invoicing unit of this line weighs, or null if unknowable. */
+function kgPerInvoicingUnit(unit?: string | null, packSize?: string | null): number | null {
+  // A line already invoiced by weight: one of that unit is its own kg factor.
+  const direct = baseUnitForDirectUnit(unit);
+  if (direct && direct.baseUnit === 'kg') return direct.factor;
+
+  // Otherwise the pack description is what ties the invoicing unit to a weight
+  // (e.g. a carton holding 6 x 2 kg).
+  const parsed = buildUnitConversions(packSize);
+  if (parsed && parsed.baseUnit === 'kg') {
+    const factor = parsed.conversions[canonicalUnit(unit) || 'each'];
+    if (factor && factor > 0) return factor;
+  }
+  return null;
 }
 
 /** The same price converted back into an invoicing unit, for display. */

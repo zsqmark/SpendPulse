@@ -15,6 +15,7 @@ import {
   basePriceFor,
   recalculateProductStats,
   rebuildHistoryFromInvoices,
+  applyWeightPricing,
 } from './src/server/productUnits.ts';
 import { handleProcurementChat } from './src/server/chatService.ts';
 import { generateCsvExport, generateJsonExport, generateSqlDump } from './src/server/exportService.ts';
@@ -202,6 +203,17 @@ app.post('/api/invoices/process', async (req, res) => {
       // (very common across the pages of a long statement) become one catalogue entry.
       const groupedItems = mergeDuplicateLineItems(extracted.items);
 
+      // Meat is bought by weight: re-express it per kilogram (total / weight) before it is
+      // matched, so a noisy meat pack string never turns into a phantom price move.
+      const normalisedItems = groupedItems.map((it) => {
+        const derived = applyWeightPricing(it);
+        return {
+          ...it,
+          unitPrice: derived.unitPrice ?? it.unitPrice,
+          unit: derived.unit ?? it.unit,
+        };
+      });
+
       const invoiceId = `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const processedItems: InvoiceItem[] = [];
 
@@ -210,7 +222,7 @@ app.post('/api/invoices/process', async (req, res) => {
       const pricedInThisInvoice = new Set<string>();
 
       // Prepare line items for single batch matching with multi-tier SKU & pack size
-      const rawItemsForBatch = groupedItems.map((it, idx) => ({
+      const rawItemsForBatch = normalisedItems.map((it, idx) => ({
         id: `item-${Date.now()}-${idx}`,
         rawDescription: it.rawDescription,
         supplierSku: it.supplierSku,
@@ -825,6 +837,15 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
     } else if (quantityChanged || unitPriceChanged) {
       // Keep the line total consistent with the corrected quantity and price.
       item.totalPrice = +(item.quantity * item.unitPrice).toFixed(2);
+    }
+
+    // Meat is priced by weight: re-derive the per-kg price from the corrected total /
+    // weight so an edited line is judged in kilograms. A unit price the user typed in
+    // themselves is respected and left alone.
+    if (!unitPriceChanged) {
+      const derived = applyWeightPricing(item);
+      if (derived.unitPrice != null) item.unitPrice = derived.unitPrice;
+      if (derived.unit) item.unit = derived.unit;
     }
 
     let product = item.masterProductId ? db.getMasterProduct(item.masterProductId) : null;

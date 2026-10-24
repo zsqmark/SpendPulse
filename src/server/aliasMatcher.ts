@@ -195,8 +195,15 @@ export function isNonProductLine(rawDescription: string): boolean {
   return NON_PRODUCT_PATTERN.test((rawDescription || '').trim());
 }
 
+/**
+ * Products whose price only makes sense per kilogram. Kept as a constant because the
+ * pricing layer keys off it - a rename here without a matching change there would
+ * silently disable weight-based pricing.
+ */
+export const MEAT_CATEGORY = 'Meat & Poultry';
+
 const CATEGORY_HINTS: Array<[RegExp, string]> = [
-  [/\b(beef|pork|lamb|chicken|poultry|meat|sausage|bacon|ribs|steak|mince)\b/i, 'Meat & Poultry'],
+  [/\b(beef|pork|lamb|chicken|poultry|meat|sausage|bacon|ribs|steak|mince)\b/i, MEAT_CATEGORY],
   [/\b(fish|salmon|prawn|shrimp|seafood|squid|crab)\b/i, 'Seafood'],
   [/\b(milk|cream|butter|cheese|yoghurt|yogurt|egg|dairy)\b/i, 'Dairy & Eggs'],
   [/\b(flour|sugar|rice|pasta|noodle|oil|salt|spice|herb|cereal|bean|lentil)\b/i, 'Dry Goods'],
