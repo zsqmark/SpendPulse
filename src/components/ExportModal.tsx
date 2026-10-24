@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiUrl } from '../lib/apiBase.ts';
 import {
   Database,
   Download,
@@ -30,7 +31,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
   const loadPreview = async (format: 'sql' | 'csv' | 'json') => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/export/${format}`);
+      const res = await fetch(apiUrl(`/api/export/${format}`));
       const text = await res.text();
       // Show first 1500 chars for preview
       setPreviewContent(text);
@@ -42,7 +43,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
   };
 
   const handleDownload = (format: 'sql' | 'csv' | 'json') => {
-    window.location.href = `/api/export/${format}`;
+    window.location.href = apiUrl(`/api/export/${format}`);
   };
 
   const handleCopy = () => {

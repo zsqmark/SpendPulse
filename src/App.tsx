@@ -80,7 +80,7 @@ export default function App() {
 
   const handleAcknowledgeAlert = async (id: string) => {
     try {
-      const res = await fetch(`/api/alerts/${id}/acknowledge`, { method: 'POST' });
+      const res = await fetch(apiUrl(`/api/alerts/${id}/acknowledge`), { method: 'POST' });
       if (res.ok) {
         setAlerts((prev) =>
           prev.map((a) => (a.id === id ? { ...a, status: 'acknowledged' } : a))
@@ -94,7 +94,7 @@ export default function App() {
 
   const handleDisputeAlert = async (id: string) => {
     try {
-      const res = await fetch(`/api/alerts/${id}/dispute`, { method: 'POST' });
+      const res = await fetch(apiUrl(`/api/alerts/${id}/dispute`), { method: 'POST' });
       if (res.ok) {
         setAlerts((prev) =>
           prev.map((a) => (a.id === id ? { ...a, status: 'disputed' } : a))
@@ -185,7 +185,7 @@ export default function App() {
     patch: LineItemPatch
   ): Promise<LineItemUpdateResult | null> => {
     try {
-      const res = await fetch(`/api/invoices/${invoiceId}/items/${itemId}`, {
+      const res = await fetch(apiUrl(`/api/invoices/${invoiceId}/items/${itemId}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),

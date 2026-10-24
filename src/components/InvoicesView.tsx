@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Invoice, InvoiceItem } from '../types/index.ts';
+import { apiUrl } from '../lib/apiBase.ts';
 import {
   FileText,
   Search,
@@ -185,7 +186,10 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
   };
 
   const selectedPages = selectedInvoice?.documentPages ?? [];
-  const activePageUrl = selectedPages.find((p) => p.pageNumber === activePage)?.url ?? null;
+  // Page URLs are stored as server-relative paths, so they need the API host prefixed
+  // when the frontend is served from a different origin than the backend.
+  const rawPageUrl = selectedPages.find((p) => p.pageNumber === activePage)?.url ?? null;
+  const activePageUrl = rawPageUrl ? apiUrl(rawPageUrl) : null;
 
   return (
     <div className="space-y-4">
