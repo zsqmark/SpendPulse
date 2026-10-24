@@ -1,0 +1,23 @@
+# SpendPulse backend via Docker Compose.
+# IMPORTANT: create .env.local (or rename to .env) in this directory first — it holds secrets
+# and is git-ignored, so it is NOT committed. Put your existing values there.
+# The named volume keeps the file-backed DB alive across restarts/rebuilds:
+#   data/database.json  +  data/documents  (uploaded invoice page images)
+services:
+  spendpulse:
+    build: .
+    image: spendpulse:latest
+    container_name: spendpulse
+    restart: unless-stopped
+    ports:
+      - "3000:3000"   # host:container (bump the left side if 3000 is taken)
+    env_file:
+      - .env.local    # secrets: DEEPSEEK_API_KEY etc.
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    volumes:
+      - spendpulse_data:/app/data   # PERSISTENT storage for invoices + documents
+
+volumes:
+  spendpulse_data:
