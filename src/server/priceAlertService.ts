@@ -238,6 +238,7 @@ export function revalidateActiveAlerts(): {
   duplicate: number;
   labelSwing: number;
   oneOff: number;
+  baseline: number;
   kept: number;
 } {
   const active = db
@@ -250,6 +251,7 @@ export function revalidateActiveAlerts(): {
   let duplicate = 0;
   let labelSwing = 0;
   let oneOff = 0;
+  let baseline = 0;
 
   for (const alert of active) {
     // One move, one alert - the earliest copy is the one worth keeping.
@@ -288,6 +290,16 @@ export function revalidateActiveAlerts(): {
     if (isOneOffSpike(product, alert)) {
       doomed.add(alert.id);
       oneOff += 1;
+      continue;
+    }
+
+    // The mirror image: the OLD price is the odd one out. BABA curry powder sits at
+    // $4.00-$4.30 on every invoice except one that read $1.45, and the "increase" to
+    // $4.30 is nothing more than a return to normal. If the new price is the product's
+    // ordinary level, nothing happened - the baseline was the outlier.
+    if (isContaminatedBaseline(product, alert)) {
+      doomed.add(alert.id);
+      baseline += 1;
     }
   }
 
@@ -297,6 +309,7 @@ export function revalidateActiveAlerts(): {
     duplicate,
     labelSwing,
     oneOff,
+    baseline,
     kept: db.getAlerts().filter((a) => a.status === 'active').length,
   };
 }
@@ -330,6 +343,36 @@ export function isOneOffSpike(product: MasterProduct, alert: PriceAlert): boolea
   // 1. it went back to (or below) the old price, and
   // 2. the new price was never sustained.
   return Math.abs(mid - baseline) <= 0.02 * baseline && mid < spike * 0.98;
+}
+
+/**
+ * True when the alert's "previous" price is the outlier and the new one is normal.
+ *
+ * isOneOffSpike asks whether the NEW price was ever sustained. This asks the opposite:
+ * was the OLD price ever real? Curry powder is $4.00-$4.30 across the whole history
+ * apart from one invoice that read $1.45, and the +197% "increase" back to $4.30 is a
+ * return to the ordinary level, not news.
+ *
+ * Only drops an alert when the new price sits at the product's normal level AND the old
+ * one is far away from it, so a genuine rise above the norm is untouched.
+ */
+export function isContaminatedBaseline(product: MasterProduct, alert: PriceAlert): boolean {
+  const prices = (product.priceHistory || [])
+    .filter((h) => h.invoiceNumber !== alert.invoiceNumber)
+    .map((h) => Number(h.unitPrice))
+    .filter((v) => Number.isFinite(v) && v > 0)
+    .sort((a, b) => a - b);
+  if (prices.length < 3) return false;
+
+  const median = prices[Math.floor(prices.length / 2)];
+  const baseline = Number(alert.previousPrice);
+  const current = Number(alert.newPrice);
+  if (!(median > 0) || !(baseline > 0) || !(current > 0)) return false;
+
+  // The new price is ordinary; the old one is not.
+  return (
+    Math.abs(current - median) <= 0.25 * median && Math.abs(baseline - median) > 0.5 * median
+  );
 }
 
 /**
