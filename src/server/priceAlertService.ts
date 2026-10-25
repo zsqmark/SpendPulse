@@ -170,11 +170,24 @@ export function compareAgainstHistory(
   let previousShown: number | null = null;
   let increase = false;
 
-  // The supplier printed the same number again. Whatever label OCR attached to it, the
-  // price on the invoice did not move - and a unit label that changed can only have made
-  // the line cheaper per unit, never more expensive. Reporting a 100% increase here is
-  // the single most common false alert in the catalogue, so it is cut off at the source.
-  const samePrintedPrice = isSamePrintedPrice(prior.unitPrice, unitPrice);
+  // The supplier printed the same number again. That fact outranks any conversion: the
+  // price on the invoice did not move, whatever label OCR attached to each line.
+  //
+  // It has to be settled here, ahead of the plausibility guard below. Two recordings of
+  // one product routinely carry different labels (each one week, carton the next), which
+  // turns an unchanged price into a 10x / 24x / 50x gap once each side is divided by its
+  // own pack size. Those pairs were being thrown out as implausible and reported as "not
+  // comparable" - roughly half the catalogue. The printed number is the ground truth.
+  if (isSamePrintedPrice(prior.unitPrice, unitPrice)) {
+    base.comparable = true;
+    base.previousPrice = prior.unitPrice;
+    base.deltaAmount = +(unitPrice - prior.unitPrice).toFixed(2);
+    base.percentChange = prior.unitPrice
+      ? +(((unitPrice - prior.unitPrice) / prior.unitPrice) * 100).toFixed(2)
+      : 0;
+    base.isIncrease = false;
+    return base;
+  }
 
   if (incomingBase != null && prevBase != null) {
     // The pack conversion is only trustworthy while the two recordings are in the same
@@ -203,14 +216,6 @@ export function compareAgainstHistory(
   // Otherwise the two numbers measure different things - not comparable.
 
   if (!base.comparable || previousShown == null) return base;
-
-  // Same number printed again: report the number the supplier actually printed last time
-  // rather than a converted figure, so the line reads "held steady" instead of carrying a
-  // jump that only exists because the two recordings were labelled differently.
-  if (samePrintedPrice) {
-    previousShown = prior.unitPrice;
-    increase = false;
-  }
 
   base.previousPrice = previousShown;
   base.deltaAmount = +(unitPrice - previousShown).toFixed(2);
