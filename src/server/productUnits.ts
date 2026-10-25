@@ -88,20 +88,18 @@ export function basePriceFor(
 /**
  * Meat is bought by weight, so the only meaningful price is the one per kilogram.
  *
- * Meat pack strings are too noisy to rely on ("2KG(6) R/W"), and a line invoiced per
- * carton or per piece otherwise records a pack price that moves with the pack size
- * rather than with the market. Wherever the line's total AND its weight can both be
- * read, the unit price is recomputed as **total / weight** and the unit set to kg, so
- * every meat line is recorded and compared per kg.
+ * On a meat line the quantity column IS the weight in kilograms: a supplier prints the
+ * carton/ea count alongside it, and that count is not the measure that matters. So the
+ * printed unit is ignored and the unit price is simply **total / quantity**, recorded
+ * per kg. (Dividing by the pack count instead is the error this exists to prevent: a
+ * 25.50 kg carton would otherwise be divided by 2 and read as 12x its real per-kg price.)
  *
- * Unchanged values are returned whenever the weight cannot be established (no total, no
- * quantity, or a pack description that says nothing about weight) - a line is never
- * silently mispriced to force a comparison.
+ * Unchanged values are returned whenever that cannot be done (no total, or a
+ * non-positive quantity) - a line is never silently mispriced to force a comparison.
  */
 export function applyWeightPricing(item: {
   rawDescription?: string | null;
   brand?: string | null;
-  packSize?: string | null;
   unit?: string | null;
   unitPrice?: number | null;
   quantity?: number | null;
@@ -114,10 +112,9 @@ export function applyWeightPricing(item: {
   const qty = Number(item.quantity);
   if (!(total > 0) || !(qty > 0)) return untouched;
 
-  const kgPerUnit = kgPerInvoicingUnit(item.unit, item.packSize);
-  if (!(kgPerUnit && kgPerUnit > 0)) return untouched;
-
-  const weightKg = qty * kgPerUnit;
+  // The quantity is the weight in kg. Only a line genuinely recorded in grams still needs
+  // scaling - a carton/pack/each label is deliberately ignored.
+  const weightKg = canonicalUnit(item.unit) === 'g' ? qty / 1000 : qty;
   if (!(weightKg > 0)) return untouched;
 
   return { unitPrice: total / weightKg, unit: 'kg' };
@@ -126,22 +123,6 @@ export function applyWeightPricing(item: {
 /** True for the products whose price only makes sense per kilogram. */
 function isMeatProduct(description: string): boolean {
   return !!description && guessCategory(description) === MEAT_CATEGORY;
-}
-
-/** How many kilograms one invoicing unit of this line weighs, or null if unknowable. */
-function kgPerInvoicingUnit(unit?: string | null, packSize?: string | null): number | null {
-  // A line already invoiced by weight: one of that unit is its own kg factor.
-  const direct = baseUnitForDirectUnit(unit);
-  if (direct && direct.baseUnit === 'kg') return direct.factor;
-
-  // Otherwise the pack description is what ties the invoicing unit to a weight
-  // (e.g. a carton holding 6 x 2 kg).
-  const parsed = buildUnitConversions(packSize);
-  if (parsed && parsed.baseUnit === 'kg') {
-    const factor = parsed.conversions[canonicalUnit(unit) || 'each'];
-    if (factor && factor > 0) return factor;
-  }
-  return null;
 }
 
 /** The same price converted back into an invoicing unit, for display. */
