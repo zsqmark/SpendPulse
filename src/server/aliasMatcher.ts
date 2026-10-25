@@ -200,10 +200,13 @@ export function isNonProductLine(rawDescription: string): boolean {
  * pricing layer keys off it - a rename here without a matching change there would
  * silently disable weight-based pricing.
  */
-export const MEAT_CATEGORY = 'Meat & Poultry';
+// Meat detection lives in src/lib/meatPricing.ts so the browser can use the very same
+// rule - two copies of the keyword list would drift apart.
+export { MEAT_CATEGORY } from '../lib/meatPricing.ts';
+import { MEAT_CATEGORY, MEAT_PATTERN } from '../lib/meatPricing.ts';
 
 const CATEGORY_HINTS: Array<[RegExp, string]> = [
-  [/\b(beef|pork|lamb|chicken|poultry|meat|sausage|bacon|ribs|steak|mince)\b/i, MEAT_CATEGORY],
+  [MEAT_PATTERN, MEAT_CATEGORY],
   [/\b(fish|salmon|prawn|shrimp|seafood|squid|crab)\b/i, 'Seafood'],
   [/\b(milk|cream|butter|cheese|yoghurt|yogurt|egg|dairy)\b/i, 'Dairy & Eggs'],
   [/\b(flour|sugar|rice|pasta|noodle|oil|salt|spice|herb|cereal|bean|lentil)\b/i, 'Dry Goods'],

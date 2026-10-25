@@ -26,6 +26,7 @@ import {
   Boxes,
 } from 'lucide-react';
 import { formatBaseUnit, formatBasePrice, describePackHierarchy } from '../lib/units.ts';
+import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
 
 interface MasterCatalogViewProps {
   products: MasterProduct[];
@@ -562,8 +563,10 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                         <span className="text-slate-300 font-bold ml-1">
                           ${item.unitPrice.toFixed(2)} /{item.unit}
                         </span>
+                        {/* Meat lines are measured by weight, not by the carton count. */}
                         <span className="text-slate-500">
-                          (Qty: {item.quantity} · Total: ${item.totalPrice.toFixed(2)})
+                          ({isMeatLine(item) ? 'Weight' : 'Qty'}: {formatLineMeasure(item)} ·
+                          Total: ${item.totalPrice.toFixed(2)})
                         </span>
                       </div>
                     </div>

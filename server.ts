@@ -793,9 +793,17 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
       packSize?: string | null;
       unit?: string;
       quantity?: number;
+      weight?: number | null;
       unitPrice?: number;
       totalPrice?: number;
     };
+
+    // Meat is priced by weight: accept the corrected weight first, because the per-kg
+    // price is re-derived from it below (total / weight).
+    if (body.weight !== undefined) {
+      const w = Number(body.weight);
+      item.weight = Number.isFinite(w) && w > 0 ? w : null;
+    }
 
     const previousUnitPrice = item.unitPrice;
     const previousLineTotal = item.totalPrice;

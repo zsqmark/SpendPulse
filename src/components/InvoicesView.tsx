@@ -30,6 +30,7 @@ import {
   previewBasePrice,
   previewBaseUnit,
 } from '../lib/units.ts';
+import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
 import type { LineItemPatch, LineItemUpdateResult } from '../types/index.ts';
 
 interface InvoicesViewProps {
@@ -83,6 +84,7 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
       packSize: item.packSize ?? '',
       unit: item.unit,
       quantity: item.quantity,
+      weight: item.weight ?? null,
       unitPrice: item.unitPrice,
       totalPrice: item.totalPrice,
     });
@@ -102,6 +104,7 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
         packSize: draft.packSize ?? null,
         unit: resolveUnit(),
         quantity: Number(draft.quantity),
+        weight: draft.weight ?? null,
         unitPrice: Number(draft.unitPrice),
         totalPrice: Number(draft.totalPrice),
       });
@@ -629,7 +632,9 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                         <tr>
                           <th className="py-2 px-3">Raw Item (From Invoice)</th>
                           <th className="py-2 px-3">Standard Master Product</th>
-                          <th className="py-2 px-3 text-center">Qty</th>
+                          {/* Meat is bought by weight, so the column carries the weight for
+                              those rows and the plain count for everything else. */}
+                          <th className="py-2 px-3 text-center">Qty / Weight</th>
                           <th className="py-2 px-3 text-right">Unit Price</th>
                           <th className="py-2 px-3 text-right">Line Total</th>
                           <th className="py-2 px-3 text-right">Price Variance</th>
@@ -727,7 +732,7 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                             </td>
 
                             <td className="py-2.5 px-3 font-mono text-center text-slate-300 tabular-nums">
-                              {item.quantity}
+                              {formatLineMeasure(item)}
                             </td>
 
                             <td className="py-2.5 px-3 font-mono text-right text-slate-200 tabular-nums">
@@ -903,16 +908,26 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                                       </label>
                                     ) : null}
 
+                                    {/* Only the measure the price is built on is editable:
+                                        the weight for meat, the count for anything else. */}
                                     <label className="col-span-1 space-y-1">
                                       <span className="text-[10px] uppercase font-mono text-slate-500">
-                                        Qty
+                                        {isMeatLine(item) ? 'Weight (kg)' : 'Qty'}
                                       </span>
                                       <input
                                         type="number"
                                         step="0.01"
-                                        value={draft.quantity ?? 0}
+                                        value={
+                                          isMeatLine(item)
+                                            ? draft.weight ?? 0
+                                            : draft.quantity ?? 0
+                                        }
                                         onChange={(e) =>
-                                          setDraft({ ...draft, quantity: Number(e.target.value) })
+                                          setDraft(
+                                            isMeatLine(item)
+                                              ? { ...draft, weight: Number(e.target.value) }
+                                              : { ...draft, quantity: Number(e.target.value) }
+                                          )
                                         }
                                         className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs font-mono text-slate-200 tabular-nums focus:outline-none focus:border-blue-500/60"
                                       />
@@ -995,14 +1010,19 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                                       )}
                                     </span>
                                     <button
-                                      onClick={() =>
+                                      onClick={() => {
+                                        // Total = measure x unit price, where the measure is
+                                        // the weight for meat and the count for everything else.
+                                        const measure = isMeatLine(item)
+                                          ? draft.weight ?? 0
+                                          : draft.quantity ?? 0;
                                         setDraft({
                                           ...draft,
                                           totalPrice:
-                                            +((Number(draft.quantity) || 0) *
+                                            +((Number(measure) || 0) *
                                               (Number(draft.unitPrice) || 0)).toFixed(2),
-                                        })
-                                      }
+                                        });
+                                      }}
                                       className="shrink-0 px-2 py-0.5 text-[10px] font-mono text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 rounded border border-slate-800"
                                     >
                                       Recalc total

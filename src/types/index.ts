@@ -125,6 +125,8 @@ export interface LineItemPatch {
   packSize?: string | null;
   unit?: string;
   quantity?: number;
+  /** The invoice's weight column, in kg. For meat this is the measure that is priced. */
+  weight?: number | null;
   unitPrice?: number;
   totalPrice?: number;
 }
