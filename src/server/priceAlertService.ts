@@ -303,8 +303,13 @@ export function revalidateActiveAlerts(): {
  * and the next five went straight back to $14.00. That is a misread, not a price rise -
  * but at upload time it is indistinguishable from a real jump, because nothing after it
  * exists yet.
+ *
+ * Both halves of the test are needed. "Came back to the old price" alone is far too keen:
+ * eggs went 62 -> 63 -> 64, and the middle step sits within 2% of the old price, so a
+ * genuine climb would lose its first rung. The price must also have FAILED to hold the
+ * new level - a rise that sticks is real, whatever it looks like against the old price.
  */
-function isOneOffSpike(product: MasterProduct, alert: PriceAlert): boolean {
+export function isOneOffSpike(product: MasterProduct, alert: PriceAlert): boolean {
   const later = (product.priceHistory || [])
     .filter((h) => (h.date || '') > (alert.invoiceDate || ''))
     .map((h) => Number(h.unitPrice))
@@ -314,10 +319,12 @@ function isOneOffSpike(product: MasterProduct, alert: PriceAlert): boolean {
   const sorted = [...later].sort((a, b) => a - b);
   const mid = sorted[Math.floor(sorted.length / 2)];
   const baseline = Number(alert.previousPrice);
-  if (!(baseline > 0) || !(mid > 0)) return false;
+  const spike = Number(alert.newPrice);
+  if (!(baseline > 0) || !(mid > 0) || !(spike > 0)) return false;
 
-  // The price came back down to where it was, so the spike never happened.
-  return Math.abs(mid - baseline) <= 0.02 * baseline;
+  // 1. it went back to (or below) the old price, and
+  // 2. the new price was never sustained.
+  return Math.abs(mid - baseline) <= 0.02 * baseline && mid < spike * 0.98;
 }
 
 /**
