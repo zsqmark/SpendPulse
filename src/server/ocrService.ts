@@ -20,6 +20,12 @@ export interface ExtractedInvoiceItem {
   brand?: string | null;
   packSize?: string | null;
   quantity: number;
+  /**
+   * The weight printed on the line, in kg. Meat invoices print Quantity (cartons) and
+   * Weight (kg) as two separate columns, and the line amount is Weight x Price. Keeping
+   * them apart is what makes a per-kg price derivable at all.
+   */
+  weight?: number | null;
   unit: string;
   unitPrice: number;
   totalPrice: number;
@@ -172,7 +178,15 @@ export function mergeDuplicateLineItems<T extends ExtractedInvoiceItem>(items: T
     const total = Number(existing.totalPrice || 0) + Number(item.totalPrice || 0);
     existing.quantity = qty;
     existing.totalPrice = Number(total.toFixed(2));
-    existing.unitPrice = qty > 0 ? Number((total / qty).toFixed(4)) : existing.unitPrice;
+
+    // A merged line's weight is the sum of its weights. Pricing off the summed carton
+    // count would be wrong wherever the supplier prints a real weight column, so the
+    // weight wins whenever one of the merged rows carried it.
+    const weight = Number(existing.weight || 0) + Number(item.weight || 0);
+    if (weight > 0) existing.weight = Number(weight.toFixed(3));
+
+    const divisor = weight > 0 ? weight : qty;
+    existing.unitPrice = divisor > 0 ? Number((total / divisor).toFixed(4)) : existing.unitPrice;
     existing.mergedCount = (existing.mergedCount || 1) + 1;
     existing.supplierSku = existing.supplierSku || item.supplierSku;
     existing.brand = existing.brand || item.brand;
@@ -270,10 +284,13 @@ For each item row:
 - supplierSku: vendor SKU/item code if printed, else null
 - brand: brand if printed, else null
 - packSize: pack configuration (e.g. 50 lb, 4/1 gal, 12/32 oz)
-- quantity: quantity purchased (number)
+- quantity: the Quantity column (number of cartons/packs/units billed)
+- weight: the Weight column in kg (decimal). Read it even when a Quantity column is
+  also printed - they are DIFFERENT numbers (e.g. Qty 3, Weight 57.640). null if the
+  line prints no weight at all.
 - unit: unit of measure (e.g. cs, bag, ea, lb)
-- unitPrice: unit price (number)
-- totalPrice: line total (number)
+- unitPrice: the printed Price column (number). Do NOT compute it - copy what is printed.
+- totalPrice: the printed Amount / line total (number)
 - pageNumber: ${pageNumber}
 `;
 
@@ -300,6 +317,7 @@ For each item row:
             brand: { type: Type.STRING },
             packSize: { type: Type.STRING },
             quantity: { type: Type.NUMBER },
+            weight: { type: Type.NUMBER },
             unit: { type: Type.STRING },
             unitPrice: { type: Type.NUMBER },
             totalPrice: { type: Type.NUMBER },
@@ -330,6 +348,7 @@ For each item row:
           brand: it.brand?.trim() || parsedTokens.brand || null,
           packSize: it.packSize?.trim() || parsedTokens.packSize || null,
           quantity: Number(it.quantity) || 1,
+          weight: Number(it.weight) > 0 ? Number(it.weight) : null,
           unit: String(it.unit || 'ea'),
           unitPrice: Number(it.unitPrice) || 0,
           totalPrice:
@@ -426,6 +445,31 @@ CRITICAL MULTI-PAGE EXTRACTION MANDATE (MANDATORY):
 4. DO NOT STOP AFTER PAGE 1: You must output entries in the "pages" array for EVERY page (pageNumber: 1, 2, ..., ${totalPagesCount}) containing all product rows appearing on that specific page.
 5. CONSOLIDATED ITEMS ARRAY: Also output all rows in the top-level "items" array in exact document sequence with their corresponding "pageNumber".
 6. FINAL INVOICE TOTAL: In multi-page invoices, the true grand total ("Total Due", "Net Invoice Total", "Balance") is printed on the FINAL page. Extract the final total payable across all pages.
+
+======================================================================
+COLUMN SEMANTICS (MANDATORY - do not collapse columns):
+======================================================================
+Read the line-item table column by column and keep each column in its own field.
+Wholesale food invoices frequently print BOTH a Quantity column and a Weight column:
+
+  Product | Description | Quantity | Weight | Price | Amount
+  CM22B   | CHICKEN ... |    3     | 57.640 | $6.00 | $345.84
+
+- quantity  = the Quantity column (3). Cartons / packs / units billed. NOT kilograms.
+- weight    = the Weight column (57.640), in kg. This is the physical weight delivered.
+- unitPrice = the printed Price column ($6.00). That is the price PER KG here, because
+              Amount = Weight x Price. Copy the printed number; never compute it.
+- totalPrice= the printed Amount column ($345.84).
+
+Rules:
+- If a Weight column is printed, you MUST fill "weight" with that number in kg. Never
+  reuse the Quantity value as the weight - they are different numbers on these lines.
+- If a weight is printed in grams (e.g. 250 g) convert it to kg (0.25).
+- If the line prints no weight at all, set weight to null. Do not guess.
+- If the only weight hint is inside the description or pack string (e.g. "2KG(6) R/W"),
+  leave "weight" null - pack strings are unreliable and must not be used as a weight.
+- amount must equal weight x price on a weight-based line; if your numbers disagree,
+  re-read the row.
 `;
 
   // Response schema enforcing page-by-page and flat items extraction
@@ -459,9 +503,10 @@ CRITICAL MULTI-PAGE EXTRACTION MANDATE (MANDATORY):
                   supplierSku: { type: Type.STRING, description: 'Supplier item code or SKU number' },
                   brand: { type: Type.STRING, description: 'Brand or manufacturer' },
                   packSize: { type: Type.STRING, description: 'Pack configuration or net weight' },
-                  quantity: { type: Type.NUMBER, description: 'Quantity purchased' },
+                  quantity: { type: Type.NUMBER, description: 'Quantity column (cartons/packs/units billed) - not kilograms' },
+                  weight: { type: Type.NUMBER, description: 'Weight column in kg as printed on the line (e.g. 57.64). null when the line prints no weight' },
                   unit: { type: Type.STRING, description: 'Unit of measure, e.g. bag, case, lb, quart' },
-                  unitPrice: { type: Type.NUMBER, description: 'Unit price' },
+                  unitPrice: { type: Type.NUMBER, description: 'The printed Price column value, copied as-is' },
                   totalPrice: { type: Type.NUMBER, description: 'Total price for line' },
                   pageNumber: { type: Type.INTEGER, description: 'Page number' },
                 },
@@ -482,9 +527,10 @@ CRITICAL MULTI-PAGE EXTRACTION MANDATE (MANDATORY):
             supplierSku: { type: Type.STRING, description: 'Supplier item code or SKU number' },
             brand: { type: Type.STRING, description: 'Brand or manufacturer' },
             packSize: { type: Type.STRING, description: 'Pack configuration or net weight' },
-            quantity: { type: Type.NUMBER, description: 'Quantity purchased' },
+            quantity: { type: Type.NUMBER, description: 'Quantity column (cartons/packs/units billed) - not kilograms' },
+            weight: { type: Type.NUMBER, description: 'Weight column in kg as printed on the line (e.g. 57.64). null when the line prints no weight' },
             unit: { type: Type.STRING, description: 'Unit of measure, e.g. bag, case, lb, quart' },
-            unitPrice: { type: Type.NUMBER, description: 'Unit price' },
+            unitPrice: { type: Type.NUMBER, description: 'The printed Price column value, copied as-is' },
             totalPrice: { type: Type.NUMBER, description: 'Total price for line' },
             pageNumber: { type: Type.INTEGER, description: 'Page number where this item appears (1, 2, ...)' },
           },
@@ -631,6 +677,7 @@ CRITICAL MULTI-PAGE EXTRACTION MANDATE (MANDATORY):
               brand: it.brand?.trim() || parsedTokens.brand || null,
               packSize: it.packSize?.trim() || parsedTokens.packSize || null,
               quantity: Number(it.quantity) || 1,
+              weight: Number(it.weight) > 0 ? Number(it.weight) : null,
               unit: String(it.unit || 'ea'),
               unitPrice: Number(it.unitPrice) || 0,
               totalPrice:

@@ -9,6 +9,8 @@ export interface InvoiceItem {
   masterProductId: string | null;
   masterProductName: string | null;
   quantity: number;
+  /** The invoice's own weight column, in kg. Separate from quantity on meat invoices. */
+  weight?: number | null;
   unit: string;
   unitPrice: number;
   totalPrice: number;

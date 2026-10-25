@@ -88,14 +88,20 @@ export function basePriceFor(
 /**
  * Meat is bought by weight, so the only meaningful price is the one per kilogram.
  *
- * On a meat line the quantity column IS the weight in kilograms: a supplier prints the
- * carton/ea count alongside it, and that count is not the measure that matters. So the
- * printed unit is ignored and the unit price is simply **total / quantity**, recorded
- * per kg. (Dividing by the pack count instead is the error this exists to prevent: a
- * 25.50 kg carton would otherwise be divided by 2 and read as 12x its real per-kg price.)
+ * A meat invoice prints Quantity and Weight as two DIFFERENT columns, and the line
+ * amount is built from the weight, not the carton count:
  *
- * Unchanged values are returned whenever that cannot be done (no total, or a
- * non-positive quantity) - a line is never silently mispriced to force a comparison.
+ *   CHICKEN MARYLAND # 22   Qty 3   Weight 57.640   Price $6.00   Amount $345.84
+ *   -> 57.640 kg x $6.00/kg = $345.84
+ *
+ * So the unit price is **total / weight (kg)**, never total / quantity. Dividing by the
+ * carton count is the specific error this prevents: it would report $115.28/kg for a
+ * product that actually costs $6.00/kg, a 19x overstatement, and every price alert
+ * built on it would be nonsense.
+ *
+ * When no weight can be established the stored values are returned untouched. A line is
+ * never silently repriced to force a comparison - an unpriceable meat line is simply
+ * left as recorded.
  */
 export function applyWeightPricing(item: {
   rawDescription?: string | null;
@@ -103,21 +109,53 @@ export function applyWeightPricing(item: {
   unit?: string | null;
   unitPrice?: number | null;
   quantity?: number | null;
+  weight?: number | null;
   totalPrice?: number | null;
 }): { unitPrice: number | null; unit: string | null } {
   const untouched = { unitPrice: item.unitPrice ?? null, unit: item.unit ?? null };
   if (!isMeatProduct(`${item.rawDescription ?? ''} ${item.brand ?? ''}`.trim())) return untouched;
 
   const total = Number(item.totalPrice);
+  if (!(total > 0)) return untouched;
+
+  const weightKg = resolveWeightKg(item);
+  if (weightKg == null) return untouched;
+
+  // Rounded to 4dp: 345.84 / 57.64 is 5.999999999999999 in floating point, and a price
+  // that leaks that into the UI (or into an alert's delta) looks like a bug.
+  return { unitPrice: Number((total / weightKg).toFixed(4)), unit: 'kg' };
+}
+
+/**
+ * The weight to divide the line amount by, in kg - or null when nothing reliable exists.
+ *
+ * Order of trust:
+ *   1. The invoice's own Weight column. Suppliers compute the amount from it, so it is
+ *      the measure the price is actually built on.
+ *   2. A quantity that is itself already a mass ("3.5 kg", "750 g"). Invoices that bill
+ *      meat by the kilogram have no separate weight column and need no conversion.
+ *   3. Nothing. A carton/pack/each count is NOT a weight, and a pack string embedded in
+ *      the description ("2KG(6) R/W") is far too noisy to convert - so neither is used.
+ */
+function resolveWeightKg(item: {
+  unit?: string | null;
+  quantity?: number | null;
+  weight?: number | null;
+}): number | null {
+  const printed = Number(item.weight);
+  if (Number.isFinite(printed) && printed > 0) {
+    // A vendor that prints grams must be scaled; the column is otherwise already kg.
+    return canonicalUnit(item.unit) === 'g' ? printed / 1000 : printed;
+  }
+
   const qty = Number(item.quantity);
-  if (!(total > 0) || !(qty > 0)) return untouched;
+  const unit = canonicalUnit(item.unit);
+  if (Number.isFinite(qty) && qty > 0) {
+    if (unit === 'kg') return qty;
+    if (unit === 'g') return qty / 1000;
+  }
 
-  // The quantity is the weight in kg. Only a line genuinely recorded in grams still needs
-  // scaling - a carton/pack/each label is deliberately ignored.
-  const weightKg = canonicalUnit(item.unit) === 'g' ? qty / 1000 : qty;
-  if (!(weightKg > 0)) return untouched;
-
-  return { unitPrice: total / weightKg, unit: 'kg' };
+  return null;
 }
 
 /** True for the products whose price only makes sense per kilogram. */
