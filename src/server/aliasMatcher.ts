@@ -3,7 +3,7 @@ import { generateJson } from './llm/index.ts';
 import { db } from './storage.ts';
 import { MasterProduct } from '../types/index.ts';
 import { learnPackHierarchy } from './productUnits.ts';
-import { buildUnitConversions } from './unitConversion.ts';
+import { buildUnitConversions, measureClassOf, measuresConflict } from './unitConversion.ts';
 
 export interface MatchResult {
   masterProductId: string | null;
@@ -316,6 +316,11 @@ export function matchItemMultiTierLocal(
     }
   }
 
+  // What this line is priced by. Two products measured differently are different products
+  // whatever the names say - see measureClassOf. Tier 1 matches below are the exception:
+  // an exact vendor SKU or a name a human has already accepted is a fact, not a guess.
+  const incomingMeasure = measureClassOf(item.packSize, item.unit);
+
   // -------------------------------------------------------------------------
   // TIER 2: PACK-SIZE & TOKEN STEM NORMALIZATION ENGINE
   // -------------------------------------------------------------------------
@@ -326,6 +331,11 @@ export function matchItemMultiTierLocal(
   let bestRawNameScore = 0;
 
   for (const prod of masterProducts) {
+    // Salt priced per kg must never absorb bleach priced per litre, however close their
+    // descriptions sit. Skipped rather than penalised: no name score can justify it.
+    const prodMeasure = measureClassOf(prod.standardPackSize, prod.standardUnit);
+    if (measuresConflict(incomingMeasure, prodMeasure)) continue;
+
     const prodTokenSet = normalizeTokens(prod.name);
     let nameScore = calculateTokenSimilarity(rawTokenSet, prodTokenSet);
 
@@ -482,6 +492,12 @@ ${JSON.stringify(
 Task:
 Reconcile each invoiced item to a master product in the catalog.
 Consider SKU codes, pack weights/sizes (e.g. 50 lb vs 25 lb must not be merged), and culinary/wholesale synonyms.
+
+HARD RULE - the measure must match:
+An item priced BY WEIGHT (kg / g / lb) can only ever match a catalog product priced by weight.
+An item priced BY VOLUME (L / mL / gal) can only ever match a product priced by volume.
+An item priced BY THE CONTAINER (each / carton / ctn / bottle / tin) can only match a product priced the same way.
+Judge the measure from the PACK SIZE first (20L is volume, 14KG is weight) and only fall back to the unit column when there is no pack size. If the measures differ, set matchedProductId to null even if the names look identical - bleach sold per 20 L is not salt sold per 14 kg.
 Confidence Guidelines:
 - >= 0.85: Confident match (identical goods, equivalent packaging)
 - 0.60 - 0.84: Probable match (likely same ingredient or pack size requires human approval)
@@ -529,7 +545,22 @@ Return JSON array with:
       if (!it) continue;
 
       const conf = typeof match.confidence === 'number' ? match.confidence : 0.5;
-      const matchedProd = match.matchedProductId ? masterProducts.find((p) => p.id === match.matchedProductId) : null;
+      let matchedProd = match.matchedProductId
+        ? masterProducts.find((p) => p.id === match.matchedProductId)
+        : null;
+
+      // The same guard as Tier 2, applied to the AI's suggestion: a candidate priced by a
+      // different measure cannot be this product, whatever confidence the model reports.
+      if (
+        matchedProd &&
+        measuresConflict(
+          measureClassOf(it.packSize, it.unit),
+          measureClassOf(matchedProd.standardPackSize, matchedProd.standardUnit)
+        )
+      ) {
+        matchedProd = null;
+      }
+
       const isAuto = conf >= 0.85 && !!matchedProd;
 
       if (isAuto && matchedProd) {

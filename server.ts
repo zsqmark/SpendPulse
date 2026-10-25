@@ -28,6 +28,7 @@ import {
 } from './src/server/documentStore.ts';
 import { Invoice, InvoiceItem, PriceAlert, MasterProduct, VendorSummary } from './src/types/index.ts';
 import { normalizeVendorName, vendorKey } from './src/lib/vendorNormalizer.ts';
+import { measureClassOf, measuresConflict, describeMeasure } from './src/server/unitConversion.ts';
 
 dotenv.config();
 // .env.local overrides .env (git-ignored local secrets).
@@ -679,6 +680,34 @@ app.post('/api/catalog/merge', (req, res) => {
 
     if (sources.length === 0) {
       return res.status(400).json({ error: 'No valid products to merge' });
+    }
+
+    // A merge joins one price history. That is only honest while every product in it is
+    // measured the same way - "$38 per 20 L" and "$14 per 14 kg" have no common basis, so
+    // combining them produces a history whose "increases" are unit artefacts. This is what
+    // put a drum of bleach inside the box of table salt. Refuse it up front rather than
+    // letting someone untangle it later.
+    const primaryMeasure = measureClassOf(primary.standardPackSize, primary.standardUnit);
+    const conflicts = sources
+      .map((src) => ({
+        product: src,
+        measure: measureClassOf(src.standardPackSize, src.standardUnit),
+      }))
+      .filter((entry) => measuresConflict(primaryMeasure, entry.measure));
+
+    if (conflicts.length > 0) {
+      const names = conflicts
+        .map(
+          (c) =>
+            `"${c.product.name}" (${c.product.standardPackSize || c.product.standardUnit || 'no unit'} - ${describeMeasure(c.measure)})`
+        )
+        .join(', ');
+      return res.status(400).json({
+        error:
+          `Cannot merge: "${primary.name}" is sold ${describeMeasure(primaryMeasure)}, ` +
+          `but ${names} ${conflicts.length > 1 ? 'are' : 'is'} sold differently. ` +
+          `Give every product the same unit before merging them.`,
+      });
     }
 
     let itemsUpdated = 0;

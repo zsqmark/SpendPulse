@@ -157,7 +157,12 @@ export default function App() {
     }
   };
 
-  const handleMergeProducts = async (primaryId: string, mergeIds: string[]) => {
+  // Resolves to null on success, or the server's reason when the merge was refused - the
+  // catalogue will not join products that are priced by different measures.
+  const handleMergeProducts = async (
+    primaryId: string,
+    mergeIds: string[]
+  ): Promise<string | null> => {
     try {
       const res = await fetch(apiUrl('/api/catalog/merge'), {
         method: 'POST',
@@ -166,12 +171,12 @@ export default function App() {
       });
       if (res.ok) {
         await loadData();
-      } else {
-        const errJson = await res.json().catch(() => ({}));
-        console.error('Failed to merge products:', errJson.error || res.status);
+        return null;
       }
-    } catch (err) {
-      console.error('Failed to merge products:', err);
+      const errJson = await res.json().catch(() => ({}));
+      return errJson.error || `Merge failed (${res.status})`;
+    } catch (err: any) {
+      return err?.message || 'Merge failed';
     }
   };
 

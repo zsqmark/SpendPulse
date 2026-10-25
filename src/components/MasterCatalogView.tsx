@@ -46,7 +46,7 @@ interface MasterCatalogViewProps {
   }) => Promise<void>;
   onApproveMatch?: (invoiceId: string, itemId: string, masterProductId: string) => Promise<void>;
   onBulkApprove?: (approvals: { invoiceId: string; itemId: string; masterProductId: string }[]) => Promise<void>;
-  onMergeProducts?: (primaryId: string, mergeIds: string[]) => Promise<void>;
+  onMergeProducts?: (primaryId: string, mergeIds: string[]) => Promise<string | null>;
   onViewProductTrends: (productId: string) => void;
   /**
    * Replays every stored invoice to rebuild price history with the invoicing unit attached,
@@ -104,6 +104,7 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   const [primaryMergeId, setPrimaryMergeId] = useState<string>('');
   const [isMerging, setIsMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<string | null>(null);
+  const [mergeFailed, setMergeFailed] = useState(false);
 
   // Rebuilding price history replays the stored invoices, which do carry the invoicing unit.
   const [isRebuilding, setIsRebuilding] = useState(false);
@@ -256,6 +257,7 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
 
   const toggleMergeSelection = (id: string) => {
     setMergeResult(null);
+    setMergeFailed(false);
     setMergeSelection((prev) => {
       const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
       if (!next.includes(primaryMergeId)) setPrimaryMergeId(next[0] || '');
@@ -267,10 +269,18 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
     if (!canMerge || !onMergeProducts) return;
     setIsMerging(true);
     try {
-      await onMergeProducts(
+      const error = await onMergeProducts(
         mergeTargetId,
         selectedProducts.filter((p) => p.id !== mergeTargetId).map((p) => p.id)
       );
+      if (error) {
+        // Refusals (different unit of measure, for example) keep the selection so the
+        // catalogue can be corrected and the merge retried.
+        setMergeFailed(true);
+        setMergeResult(error);
+        return;
+      }
+      setMergeFailed(false);
       setMergeResult(
         `Merged ${selectedProducts.length} products into "${mergeTarget?.name}".`
       );
@@ -891,7 +901,13 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
         )}
 
         {mergeResult && (
-          <div className="px-3 py-2 rounded-lg border border-emerald-800/40 bg-emerald-950/20 text-xs text-emerald-300">
+          <div
+            className={
+              mergeFailed
+                ? 'px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/20 text-xs text-rose-300'
+                : 'px-3 py-2 rounded-lg border border-emerald-800/40 bg-emerald-950/20 text-xs text-emerald-300'
+            }
+          >
             {mergeResult}
           </div>
         )}

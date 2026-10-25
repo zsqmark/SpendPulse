@@ -178,3 +178,89 @@ export function formatBaseUnit(baseUnit?: string | null): string {
   if (baseUnit === 'each') return 'ea';
   return baseUnit;
 }
+
+/** Invoicing units that count containers rather than measuring content. */
+const COUNTING_UNITS = ['case', 'each', 'pack', 'bag', 'box', 'tray', 'roll', 'tin', 'tub', 'bottle'];
+
+/**
+ * The coarse thing a product is priced by - weight, volume, or a count of containers.
+ *
+ * Two lines priced by different measures can never be the same product: a drum of bleach
+ * sold per 20 L has nothing to do with a box of salt sold per 14 kg, however similar their
+ * names look to a matcher. Keeping them apart is the difference between a price history
+ * and a pile of unrelated numbers.
+ */
+export type MeasureClass = 'weight' | 'volume' | 'count';
+
+/**
+ * Reads the measure out of a pack description even when it hides behind a container word.
+ * OCR writes these constantly - "1bag*1KG", "2jars*20L", "700g (15 dozens/box)",
+ * "5bottles*200G" - and every one of them is a weight or a volume, not a new kind of unit.
+ */
+const MEASURE_IN_TEXT =
+  /(\d+(?:\.\d+)?)\s*(kilograms?|kilos?|kgs?|ks?|grams?|gr|gms?|gm|lbs?|pounds?|millilitres?|milliliters?|mls?|litres?|liters?|ltrs?|gals?|gallons?|qts?|quarts?|g|l|k)\b/;
+
+function measureFromPackText(packSize?: string | null): MeasureClass | null {
+  if (!packSize) return null;
+  const match = String(packSize).toLowerCase().replace(/,/g, ' ').match(MEASURE_IN_TEXT);
+  if (!match) return null;
+  // Wholesale shorthand arrives without its vowels - "20K" is 20 kg, "500gr" is 500 g.
+  const measure = canonicalUnit(
+    match[2].replace(/^k$/, 'kg').replace(/^(gr|gm|gms)$/, 'g')
+  );
+  if (['kg', 'g', 'lb'].includes(measure)) return 'weight';
+  if (['l', 'ml', 'gal', 'qt'].includes(measure)) return 'volume';
+  return null;
+}
+
+/**
+ * What a line (or a catalogue product) is priced by.
+ *
+ * The pack size is asked first because it states what is actually inside the container -
+ * "14KG" is sold by weight even when the invoice label says "Carton". The invoicing unit
+ * is only consulted when the pack says nothing.
+ *
+ * Returns null when neither is informative. An unknown measure must never be the reason
+ * two products are kept apart; only a *known conflict* blocks a merge.
+ */
+export function measureClassOf(packSize?: string | null, unit?: string | null): MeasureClass | null {
+  const fromPack = buildUnitConversions(packSize);
+  if (fromPack) return fromPack.baseUnit === 'kg' ? 'weight' : 'volume';
+
+  const fromPackText = measureFromPackText(packSize);
+  if (fromPackText) return fromPackText;
+
+  const direct = baseUnitForDirectUnit(unit);
+  if (direct) {
+    if (direct.baseUnit === 'kg') return 'weight';
+    if (direct.baseUnit === 'l') return 'volume';
+    // "each" names nothing about what is in the container - a "per each" price can sit on
+    // a kilogram, a litre or a single can. Treating it as unknown keeps one product from
+    // being split apart whenever OCR misses the pack column on a single invoice.
+    return null;
+  }
+
+  return COUNTING_UNITS.includes(canonicalUnit(unit)) ? 'count' : null;
+}
+
+/** Plain-English description for error messages shown to the user. */
+export function describeMeasure(measure: MeasureClass | null): string {
+  if (measure === 'weight') return 'by weight (kg / g)';
+  if (measure === 'volume') return 'by volume (L / mL)';
+  if (measure === 'count') return 'by the container (each / carton)';
+  return 'by an unstated measure';
+}
+
+/**
+ * True only when two prices genuinely measure different things - weight against volume.
+ *
+ * A "count" price is deliberately NOT a conflict: "$14 per box" says nothing about what is
+ * in the box, and OCR drops the pack column often enough that treating count as a separate
+ * measure would scatter one product across several master products. Mass versus litres is
+ * a different story - those can never describe the same goods.
+ */
+export function measuresConflict(a: MeasureClass | null, b: MeasureClass | null): boolean {
+  if (!a || !b) return false;
+  const pair = [a, b].sort().join('|');
+  return pair === 'volume|weight';
+}
