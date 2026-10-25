@@ -12,7 +12,7 @@
  */
 
 import { db } from './storage.ts';
-import { unitMeasureClass } from './aliasMatcher.ts';
+import { canonicalUnit, unitMeasureClass } from './aliasMatcher.ts';
 import { baseUnitForDirectUnit } from './unitConversion.ts';
 import {
   learnPackHierarchy,
@@ -82,6 +82,57 @@ export interface PriceComparison {
 }
 
 /**
+ * Two numbers that close together are the supplier printing the same price again.
+ * Rounding and re-keying move a price by cents, never by a whole pack multiplier.
+ */
+const SAME_PRINTED_PRICE_TOLERANCE = 0.005; // 0.5%
+
+/**
+ * True when the supplier printed the same number as last time.
+ *
+ * This is the plainest fact available: whatever unit label OCR attached to it, the price
+ * on the invoice did not go up. A line that reads "21.50 Unit" after "21.50 Carton" is
+ * the same money, not a 100% increase.
+ */
+function isSamePrintedPrice(previous: number, current: number): boolean {
+  if (!Number.isFinite(previous) || !Number.isFinite(current)) return false;
+  const scale = Math.max(Math.abs(previous), Math.abs(current), 0.01);
+  return Math.abs(previous - current) <= SAME_PRINTED_PRICE_TOLERANCE * scale;
+}
+
+/**
+ * True when the whole gap between two recordings is explained by their unit labels.
+ *
+ * OCR reads the unit column inconsistently for one and the same product - "Unit" one
+ * week, "Carton" the next. For a 2*8L product a carton holds 2 units, so the same
+ * printed price converts into 2.6875/L one week and 1.34375/L the next, and the system
+ * reports a 100% increase that never happened. The tell is that the ratio between the
+ * two prices is exactly the ratio between the two labels and nothing else.
+ */
+export function isUnitLabelSwing(
+  product: MasterProduct,
+  previousShown: number,
+  current: number,
+  previousUnit?: string | null,
+  currentUnit?: string | null
+): boolean {
+  const from = canonicalUnit(previousUnit);
+  const to = canonicalUnit(currentUnit);
+  if (!from || !to || from === to) return false;
+
+  const table = product.unitConversions;
+  if (!table) return false;
+  const fromSize = table[from];
+  const toSize = table[to];
+  if (!(fromSize > 0) || !(toSize > 0)) return false;
+  if (!(previousShown > 0) || !(current > 0)) return false;
+
+  const expected = fromSize / toSize; // the gap the labels alone would produce
+  const actual = current / previousShown;
+  return Math.abs(actual - expected) <= 0.02 * Math.max(expected, 1);
+}
+
+/**
  * Compares a price against the product's history without writing anything.
  * Shared by the upload pipeline and by the line editor, so a corrected line is judged
  * by exactly the same rule as a freshly scanned one.
@@ -119,6 +170,12 @@ export function compareAgainstHistory(
   let previousShown: number | null = null;
   let increase = false;
 
+  // The supplier printed the same number again. Whatever label OCR attached to it, the
+  // price on the invoice did not move - and a unit label that changed can only have made
+  // the line cheaper per unit, never more expensive. Reporting a 100% increase here is
+  // the single most common false alert in the catalogue, so it is cut off at the source.
+  const samePrintedPrice = isSamePrintedPrice(prior.unitPrice, unitPrice);
+
   if (incomingBase != null && prevBase != null) {
     // The pack conversion is only trustworthy while the two recordings are in the same
     // ballpark. A carton price mislabelled "each" converts into a 3000% increase, which is
@@ -130,6 +187,12 @@ export function compareAgainstHistory(
     base.comparable = true;
     previousShown = priceInUnit(product, prevBase, unit) ?? prior.unitPrice;
     increase = isRealIncrease(prevBase, incomingBase);
+
+    // A gap that is exactly the ratio between the two unit labels is the label moving,
+    // not the price. See isUnitLabelSwing.
+    if (increase && isUnitLabelSwing(product, previousShown, unitPrice, priorUnit, unit)) {
+      increase = false;
+    }
   } else if (unitMeasureClass(unit) === unitMeasureClass(priorUnit)) {
     // No hierarchy known, but the prices are quoted on the same basis.
     if (!isPlausibleStep(prior.unitPrice, unitPrice)) return base;
@@ -141,11 +204,107 @@ export function compareAgainstHistory(
 
   if (!base.comparable || previousShown == null) return base;
 
+  // Same number printed again: report the number the supplier actually printed last time
+  // rather than a converted figure, so the line reads "held steady" instead of carrying a
+  // jump that only exists because the two recordings were labelled differently.
+  if (samePrintedPrice) {
+    previousShown = prior.unitPrice;
+    increase = false;
+  }
+
   base.previousPrice = previousShown;
   base.deltaAmount = +(unitPrice - previousShown).toFixed(2);
   base.percentChange = +(((unitPrice - previousShown) / previousShown) * 100).toFixed(2);
   base.isIncrease = increase;
   return base;
+}
+
+/**
+ * Re-runs the open alerts through today's rules and drops the ones that no longer stand
+ * up: exact copies of a move already reported, and alerts whose "increase" is only the
+ * unit label moving.
+ *
+ * The catalogue accumulated a good number of these before the guards existed - 100% and
+ * 200% "increases" on products whose printed price never changed. They are removed rather
+ * than corrected, because the comparison that produced them was never valid.
+ */
+export function revalidateActiveAlerts(): {
+  removed: number;
+  duplicate: number;
+  labelSwing: number;
+  kept: number;
+} {
+  const active = db
+    .getAlerts()
+    .filter((a) => a.status === 'active')
+    .sort((a, b) => (a.detectedAt || '').localeCompare(b.detectedAt || ''));
+
+  const doomed = new Set<string>();
+  const seenMoves = new Set<string>();
+  let duplicate = 0;
+  let labelSwing = 0;
+
+  for (const alert of active) {
+    // One move, one alert - the earliest copy is the one worth keeping.
+    const moveKey = [
+      alert.masterProductId,
+      alert.vendorName,
+      Number(alert.previousPrice ?? 0).toFixed(2),
+      Number(alert.newPrice ?? 0).toFixed(2),
+    ].join('|');
+    if (seenMoves.has(moveKey)) {
+      doomed.add(alert.id);
+      duplicate += 1;
+      continue;
+    }
+    seenMoves.add(moveKey);
+
+    const product = db.getMasterProduct(alert.masterProductId);
+    if (!product) continue;
+
+    const comparison = compareAgainstHistory(
+      product,
+      alert.newPrice,
+      alert.unit,
+      alert.invoiceNumber,
+      alert.invoiceDate
+    );
+    if (!comparison.isIncrease) {
+      doomed.add(alert.id);
+      labelSwing += 1;
+    }
+  }
+
+  const removed = db.pruneAlerts((a) => !doomed.has(a.id));
+  return {
+    removed,
+    duplicate,
+    labelSwing,
+    kept: db.getAlerts().filter((a) => a.status === 'active').length,
+  };
+}
+
+/**
+ * True when this exact price move has already been reported and is still open.
+ *
+ * The pair (previous -> new) is compared with a small tolerance so a re-rounded figure
+ * is still recognised as the same move.
+ */
+function hasSameActiveAlert(
+  masterProductId: string,
+  vendorName: string,
+  previousPrice: number | null,
+  newPrice: number
+): boolean {
+  if (previousPrice == null) return false;
+  return db.getAlerts().some(
+    (a) =>
+      a.status === 'active' &&
+      a.masterProductId === masterProductId &&
+      a.vendorName === vendorName &&
+      Math.abs((a.newPrice ?? 0) - newPrice) <= 0.01 &&
+      Math.abs((a.previousPrice ?? 0) - previousPrice) <= 0.01
+  );
 }
 
 export function checkAndRecordPriceChange(params: {
@@ -195,6 +354,13 @@ export function checkAndRecordPriceChange(params: {
     baseUnit: comparison.baseUnit,
     comparable: comparison.comparable,
   };
+
+  // One move, one alert. The same product re-crossing the same two prices later is the
+  // same news, not new news - otherwise a price that oscillates between two values
+  // (or a unit label that keeps flipping back) fills the inbox with copies.
+  if (comparison.isIncrease && !suppressAlert && hasSameActiveAlert(product.id, vendorName, comparison.previousPrice, unitPrice)) {
+    comparison.isIncrease = false;
+  }
 
   if (comparison.isIncrease && !suppressAlert) {
     const alert: PriceAlert = {

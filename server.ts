@@ -9,6 +9,7 @@ import { batchMatchItems } from './src/server/aliasMatcher.ts';
 import {
   checkAndRecordPriceChange,
   compareAgainstHistory,
+  revalidateActiveAlerts,
 } from './src/server/priceAlertService.ts';
 import {
   learnPackHierarchy,
@@ -1403,6 +1404,19 @@ app.post('/api/alerts/:id/dispute', (req, res) => {
   const alert = db.updateAlertStatus(req.params.id, 'disputed');
   if (!alert) return res.status(404).json({ error: 'Alert not found' });
   res.json(alert);
+});
+
+/**
+ * Re-judges every open alert with the current rules and drops the ones that no longer
+ * hold: copies of a move already reported, and "increases" that are only the unit label
+ * moving. Safe to run repeatedly.
+ */
+app.post('/api/alerts/revalidate', (req, res) => {
+  try {
+    res.json(revalidateActiveAlerts());
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Could not revalidate alerts' });
+  }
 });
 
 // 6. Conversational Procurement Intelligence & Future Forecasts
