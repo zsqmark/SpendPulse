@@ -232,6 +232,7 @@ export function revalidateActiveAlerts(): {
   removed: number;
   duplicate: number;
   labelSwing: number;
+  oneOff: number;
   kept: number;
 } {
   const active = db
@@ -243,6 +244,7 @@ export function revalidateActiveAlerts(): {
   const seenMoves = new Set<string>();
   let duplicate = 0;
   let labelSwing = 0;
+  let oneOff = 0;
 
   for (const alert of active) {
     // One move, one alert - the earliest copy is the one worth keeping.
@@ -272,6 +274,15 @@ export function revalidateActiveAlerts(): {
     if (!comparison.isIncrease) {
       doomed.add(alert.id);
       labelSwing += 1;
+      continue;
+    }
+
+    // A price that jumps for exactly one invoice and then goes straight back was never a
+    // rise - it is one bad read. This can only be seen after the fact, which is why it
+    // belongs here and not in the live check: a real increase stays at the new level.
+    if (isOneOffSpike(product, alert)) {
+      doomed.add(alert.id);
+      oneOff += 1;
     }
   }
 
@@ -280,8 +291,33 @@ export function revalidateActiveAlerts(): {
     removed,
     duplicate,
     labelSwing,
+    oneOff,
     kept: db.getAlerts().filter((a) => a.status === 'active').length,
   };
+}
+
+/**
+ * True when the alert's "new" price appears once and every later invoice contradicts it.
+ *
+ * Olsson's table salt is $14.00 on thirteen of fourteen invoices; one read it as $26.00
+ * and the next five went straight back to $14.00. That is a misread, not a price rise -
+ * but at upload time it is indistinguishable from a real jump, because nothing after it
+ * exists yet.
+ */
+function isOneOffSpike(product: MasterProduct, alert: PriceAlert): boolean {
+  const later = (product.priceHistory || [])
+    .filter((h) => (h.date || '') > (alert.invoiceDate || ''))
+    .map((h) => Number(h.unitPrice))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  if (later.length < 2) return false;
+
+  const sorted = [...later].sort((a, b) => a - b);
+  const mid = sorted[Math.floor(sorted.length / 2)];
+  const baseline = Number(alert.previousPrice);
+  if (!(baseline > 0) || !(mid > 0)) return false;
+
+  // The price came back down to where it was, so the spike never happened.
+  return Math.abs(mid - baseline) <= 0.02 * baseline;
 }
 
 /**
