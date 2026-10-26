@@ -198,15 +198,16 @@ export type MeasureClass = 'weight' | 'volume' | 'count';
  * "5bottles*200G" - and every one of them is a weight or a volume, not a new kind of unit.
  */
 const MEASURE_IN_TEXT =
-  /(\d+(?:\.\d+)?)\s*(kilograms?|kilos?|kgs?|ks?|grams?|gr|gms?|gm|lbs?|pounds?|millilitres?|milliliters?|mls?|litres?|liters?|ltrs?|gals?|gallons?|qts?|quarts?|g|l|k)\b/;
+  /(\d+(?:\.\d+)?)\s*(kilograms?|kilos?|kgs?|ks?|grams?|gr|gms?|gm|lbs?|pounds?|millilitres?|milliliters?|mls?|litres?|liters?|ltrs?|gals?|gallons?|qts?|quarts?|g|l|m|k)\b/;
 
 function measureFromPackText(packSize?: string | null): MeasureClass | null {
   if (!packSize) return null;
   const match = String(packSize).toLowerCase().replace(/,/g, ' ').match(MEASURE_IN_TEXT);
   if (!match) return null;
-  // Wholesale shorthand arrives without its vowels - "20K" is 20 kg, "500gr" is 500 g.
+  // Wholesale shorthand arrives without its vowels - "20K" is 20 kg, "500gr" is 500 g and
+  // "12*400M" (a recurring truncation of this supplier's "12*400ML") is 400 mL.
   const measure = canonicalUnit(
-    match[2].replace(/^k$/, 'kg').replace(/^(gr|gm|gms)$/, 'g')
+    match[2].replace(/^k$/, 'kg').replace(/^(gr|gm|gms)$/, 'g').replace(/^m$/, 'ml')
   );
   if (['kg', 'g', 'lb'].includes(measure)) return 'weight';
   if (['l', 'ml', 'gal', 'qt'].includes(measure)) return 'volume';
