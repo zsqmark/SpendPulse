@@ -79,6 +79,30 @@ export interface Invoice {
   contentHash?: string;
 }
 
+/** One invoice line as seen from the catalogue, with the measure it is priced by. */
+export interface CatalogLine {
+  invoiceId: string;
+  itemId: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  vendorName: string;
+  rawDescription: string;
+  unit?: string | null;
+  packSize?: string | null;
+  unitPrice: number;
+  quantity?: number | null;
+  /** 'weight' | 'volume' | 'count', or null when neither the pack nor the unit says. */
+  measure: string | null;
+  /** True when this line's measure clashes with the product it has been filed under. */
+  conflicts: boolean;
+}
+
+export interface ProductLinesPayload {
+  product: MasterProduct;
+  productMeasure: string | null;
+  lines: CatalogLine[];
+}
+
 export interface MasterProduct {
   id: string;
   sku: string;

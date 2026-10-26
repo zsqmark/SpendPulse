@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MasterProduct, Invoice } from '../types/index.ts';
+import { MasterProduct, Invoice, ProductLinesPayload } from '../types/index.ts';
 import {
   PackageCheck,
   Search,
@@ -24,6 +24,7 @@ import {
   ArrowUpZA,
   Combine,
   Boxes,
+  Scissors,
 } from 'lucide-react';
 import { formatBaseUnit, formatBasePrice, describePackHierarchy } from '../lib/units.ts';
 import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
@@ -47,6 +48,13 @@ interface MasterCatalogViewProps {
   onApproveMatch?: (invoiceId: string, itemId: string, masterProductId: string) => Promise<void>;
   onBulkApprove?: (approvals: { invoiceId: string; itemId: string; masterProductId: string }[]) => Promise<void>;
   onMergeProducts?: (primaryId: string, mergeIds: string[]) => Promise<string | null>;
+  onFetchProductLines?: (productId: string) => Promise<ProductLinesPayload | null>;
+  onSplitProduct?: (payload: {
+    productId: string;
+    lineRefs: { invoiceId: string; itemId: string }[];
+    targetProductId?: string;
+    newProduct?: { name?: string; unit?: string; packSize?: string; category?: string };
+  }) => Promise<string | null>;
   onViewProductTrends: (productId: string) => void;
   /**
    * Replays every stored invoice to rebuild price history with the invoicing unit attached,
@@ -74,6 +82,8 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   onApproveMatch,
   onBulkApprove,
   onMergeProducts,
+  onFetchProductLines,
+  onSplitProduct,
   onViewProductTrends,
   onRebuildPriceHistory,
 }) => {
@@ -105,6 +115,18 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   const [isMerging, setIsMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<string | null>(null);
   const [mergeFailed, setMergeFailed] = useState(false);
+
+  // Taking wrongly-attached lines back out of a product again.
+  const [splitTarget, setSplitTarget] = useState<MasterProduct | null>(null);
+  const [splitLines, setSplitLines] = useState<ProductLinesPayload['lines']>([]);
+  const [splitSelection, setSplitSelection] = useState<string[]>([]);
+  const [splitName, setSplitName] = useState('');
+  const [splitMode, setSplitMode] = useState<'new' | 'existing'>('new');
+  const [splitExistingId, setSplitExistingId] = useState('');
+  const [isSplitLoading, setIsSplitLoading] = useState(false);
+  const [isSplitting, setIsSplitting] = useState(false);
+  const [splitResult, setSplitResult] = useState<string | null>(null);
+  const [splitFailed, setSplitFailed] = useState(false);
 
   // Rebuilding price history replays the stored invoices, which do carry the invoicing unit.
   const [isRebuilding, setIsRebuilding] = useState(false);
@@ -288,6 +310,73 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
       setPrimaryMergeId('');
     } finally {
       setIsMerging(false);
+    }
+  };
+
+  const measureLabel = (measure: string | null) =>
+    measure === 'weight' ? 'weight' : measure === 'volume' ? 'volume' : measure || 'unknown';
+
+  const openSplit = async (product: MasterProduct) => {
+    if (!onFetchProductLines) return;
+    setIsSplitLoading(true);
+    setSplitTarget(product);
+    setSplitResult(null);
+    setSplitFailed(false);
+    setSplitMode('new');
+    setSplitExistingId('');
+    try {
+      const payload = await onFetchProductLines(product.id);
+      const lines = payload?.lines || [];
+      setSplitLines(lines);
+      // Start from the rows the rule already says cannot belong here, so the common case
+      // (a stray item merged into the wrong product) is one click away.
+      setSplitSelection(lines.filter((l) => l.conflicts).map((l) => l.itemId));
+      setSplitName('');
+    } finally {
+      setIsSplitLoading(false);
+    }
+  };
+
+  const toggleSplitLine = (itemId: string) => {
+    setSplitResult(null);
+    setSplitFailed(false);
+    setSplitSelection((prev) =>
+      prev.includes(itemId) ? prev.filter((x) => x !== itemId) : [...prev, itemId]
+    );
+  };
+
+  const runSplit = async () => {
+    if (!splitTarget || !onSplitProduct || splitSelection.length === 0) return;
+    const selected = splitLines.filter((l) => splitSelection.includes(l.itemId));
+    if (selected.length === splitLines.length) {
+      setSplitFailed(true);
+      setSplitResult(
+        'That would move every line out. Keep at least one behind, or delete the product instead.'
+      );
+      return;
+    }
+    setIsSplitting(true);
+    try {
+      const error = await onSplitProduct({
+        productId: splitTarget.id,
+        lineRefs: selected.map((l) => ({ invoiceId: l.invoiceId, itemId: l.itemId })),
+        targetProductId: splitMode === 'existing' && splitExistingId ? splitExistingId : undefined,
+        newProduct: splitMode === 'new' && splitName.trim() ? { name: splitName.trim() } : undefined,
+      });
+      if (error) {
+        setSplitFailed(true);
+        setSplitResult(error);
+        return;
+      }
+      setSplitFailed(false);
+      setSplitResult(
+        `Split ${selected.length} line(s) out of "${splitTarget.name}".`
+      );
+      setSplitTarget(null);
+      setSplitLines([]);
+      setSplitSelection([]);
+    } finally {
+      setIsSplitting(false);
     }
   };
 
@@ -1037,6 +1126,19 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                       </span>
                     </div>
 
+                    {onFetchProductLines && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openSplit(prod);
+                        }}
+                        className="px-3 py-1.5 text-xs font-semibold text-amber-300 hover:text-amber-200 bg-amber-950/40 hover:bg-amber-900/40 border border-amber-800/40 rounded-lg transition-colors flex items-center gap-1.5"
+                      >
+                        <Scissors className="w-3.5 h-3.5" />
+                        <span>Split</span>
+                      </button>
+                    )}
+
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1054,6 +1156,165 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* TAKE WRONGLY-ATTACHED LINES BACK OUT OF A PRODUCT */}
+      {splitTarget && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-start justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-3xl w-full p-6 space-y-4 shadow-xl my-8">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Scissors className="w-4 h-4 text-amber-400" />
+                <span>Split lines out of "{splitTarget.name}"</span>
+              </h3>
+              <button
+                onClick={() => setSplitTarget(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              Sold {measureLabel(splitLines[0]?.measure ?? null) === 'unknown' ? 'by an unknown measure' : `by ${measureLabel(splitLines[0]?.measure ?? null)}`}.
+              Tick the rows that are a different product and give them a product of their own;
+              both sides are then rebuilt from the invoices.
+            </p>
+
+            {splitResult && (
+              <div
+                className={
+                  splitFailed
+                    ? 'px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/20 text-xs text-rose-300'
+                    : 'px-3 py-2 rounded-lg border border-emerald-800/40 bg-emerald-950/20 text-xs text-emerald-300'
+                }
+              >
+                {splitResult}
+              </div>
+            )}
+
+            <div className="border border-slate-800 rounded-lg overflow-hidden max-h-72 overflow-y-auto">
+              {isSplitLoading ? (
+                <div className="p-4 text-xs text-slate-400">Loading lines…</div>
+              ) : splitLines.length === 0 ? (
+                <div className="p-4 text-xs text-slate-400">No invoice lines attached.</div>
+              ) : (
+                splitLines.map((line) => {
+                  const checked = splitSelection.includes(line.itemId);
+                  return (
+                    <label
+                      key={line.itemId}
+                      className="flex items-start gap-3 px-3 py-2 border-b border-slate-800/60 hover:bg-slate-800/30 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSplitLine(line.itemId)}
+                        className="mt-1"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-slate-200 truncate">
+                            {line.rawDescription}
+                          </span>
+                          {line.conflicts && (
+                            <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-rose-950/50 text-rose-300 border border-rose-800/50">
+                              sold by {measureLabel(line.measure)} — cannot belong here
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono">
+                          {line.invoiceDate} · {line.vendorName} · inv #{line.invoiceNumber} ·{' '}
+                          {line.packSize || line.unit || 'no unit'} · ${Number(line.unitPrice).toFixed(2)}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center gap-4 text-xs">
+                <label className="flex items-center gap-1.5 text-slate-300">
+                  <input
+                    type="radio"
+                    checked={splitMode === 'new'}
+                    onChange={() => setSplitMode('new')}
+                  />
+                  New product
+                </label>
+                <label className="flex items-center gap-1.5 text-slate-300">
+                  <input
+                    type="radio"
+                    checked={splitMode === 'existing'}
+                    onChange={() => setSplitMode('existing')}
+                  />
+                  Move into an existing product
+                </label>
+                {splitLines.some((l) => l.conflicts) && (
+                  <button
+                    onClick={() => setSplitSelection(splitLines.filter((l) => l.conflicts).map((l) => l.itemId))}
+                    className="ml-auto text-[11px] font-semibold text-rose-300 hover:text-rose-200"
+                  >
+                    Select every conflicting row
+                  </button>
+                )}
+              </div>
+
+              {splitMode === 'new' ? (
+                <input
+                  type="text"
+                  value={splitName}
+                  onChange={(e) => setSplitName(e.target.value)}
+                  placeholder="Name for the new product (defaults to the longest selected line)"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-amber-500"
+                />
+              ) : (
+                <select
+                  value={splitExistingId}
+                  onChange={(e) => setSplitExistingId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="">Select a product…</option>
+                  {products
+                    .filter((p) => p.id !== splitTarget.id)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.standardPackSize || p.standardUnit})
+                      </option>
+                    ))}
+                </select>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                onClick={() => setSplitTarget(null)}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-300 hover:text-white border border-slate-700 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runSplit}
+                disabled={
+                  isSplitting ||
+                  isSplitLoading ||
+                  splitSelection.length === 0 ||
+                  (splitMode === 'existing' && !splitExistingId)
+                }
+                className="px-3 py-1.5 text-xs font-semibold text-amber-200 bg-amber-900/40 hover:bg-amber-800/50 border border-amber-700/50 rounded-lg disabled:opacity-40 flex items-center gap-1.5"
+              >
+                <Scissors className="w-3.5 h-3.5" />
+                <span>
+                  {isSplitting
+                    ? 'Splitting…'
+                    : `Split ${splitSelection.length} line${splitSelection.length === 1 ? '' : 's'} out`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CREATE NEW MASTER PRODUCT MODAL */}
       {isCreatingNew && (

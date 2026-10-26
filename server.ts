@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { db } from './src/server/storage.ts';
 import { mergeDuplicateLineItems, extractInvoicesFromDocument } from './src/server/ocrService.ts';
-import { batchMatchItems } from './src/server/aliasMatcher.ts';
+import { batchMatchItems, guessCategory } from './src/server/aliasMatcher.ts';
 import {
   checkAndRecordPriceChange,
   compareAgainstHistory,
@@ -85,6 +85,79 @@ function invoiceSummary(inv: Invoice) {
     itemCount: inv.itemCount,
     importedAt: inv.createdAt,
   };
+}
+
+/**
+ * Rebuilds one product's history and stats from the invoice lines that still reference it.
+ * Used after lines are taken away from it, so it stops quoting prices that belonged to
+ * something else.
+ */
+function refreshProductFromInvoices(productId: string): void {
+  const product = db.getMasterProduct(productId);
+  if (!product) return;
+
+  const entries: Parameters<typeof rebuildHistoryFromInvoices>[1] = [];
+  for (const invoice of db.getInvoices()) {
+    for (const item of invoice.items) {
+      if (item.masterProductId !== productId) continue;
+      entries.push({
+        date: invoice.invoiceDate,
+        vendor: invoice.vendorName,
+        unitPrice: item.unitPrice,
+        invoiceNumber: invoice.invoiceNumber,
+        unit: item.unit,
+        packSize: item.packSize,
+      });
+    }
+  }
+
+  if (entries.length === 0) {
+    // Everything was split away from it. The record stays, but it no longer claims prices.
+    product.priceHistory = [];
+    recalculateProductStats(product);
+    db.saveMasterProduct(product);
+    return;
+  }
+
+  rebuildHistoryFromInvoices(product, entries);
+  db.saveMasterProduct(product);
+}
+
+/** Re-judges every line of one invoice against the product it now belongs to. */
+function refreshLineComparisons(invoiceId: string): void {
+  const invoice = db.getInvoice(invoiceId);
+  if (!invoice) return;
+
+  for (const item of invoice.items) {
+    if (!item.masterProductId) continue;
+    const product = db.getMasterProduct(item.masterProductId);
+    if (!product) continue;
+    const cmp = compareAgainstHistory(
+      product,
+      item.unitPrice,
+      item.unit,
+      invoice.invoiceNumber,
+      invoice.invoiceDate
+    );
+    item.previousPrice = cmp.previousPrice;
+    item.priceDelta = cmp.deltaAmount;
+    item.priceDeltaPercent = cmp.percentChange;
+    item.baseUnitPrice = cmp.baseUnitPrice;
+    item.baseUnit = cmp.baseUnit;
+    item.priceComparable = cmp.comparable;
+  }
+  db.updateInvoice(invoice.id, invoice);
+}
+
+/** How many invoice lines currently point at a product. */
+function countLines(productId: string): number {
+  let n = 0;
+  for (const invoice of db.getInvoices()) {
+    for (const item of invoice.items) {
+      if (item.masterProductId === productId) n++;
+    }
+  }
+  return n;
 }
 
 // ----------------------------------------------------
@@ -798,6 +871,216 @@ app.post('/api/catalog/merge', (req, res) => {
   } catch (err: any) {
     console.error('Merge failed:', err);
     res.status(500).json({ error: err.message || 'Merge failed' });
+  }
+});
+
+/**
+ * Every invoice line attached to one master product, tagged with the measure it is priced
+ * by, so the catalogue screen can show which rows do not belong.
+ */
+app.get('/api/catalog/:productId/lines', (req, res) => {
+  try {
+    const product = db.getMasterProduct(req.params.productId);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const productMeasure = measureClassOf(product.standardPackSize, product.standardUnit);
+    const lines = [];
+
+    for (const invoice of db.getInvoices()) {
+      for (const item of invoice.items) {
+        if (item.masterProductId !== product.id) continue;
+        const lineMeasure = measureClassOf(item.packSize, item.unit);
+        lines.push({
+          invoiceId: invoice.id,
+          itemId: item.id,
+          invoiceNumber: invoice.invoiceNumber,
+          invoiceDate: invoice.invoiceDate,
+          vendorName: invoice.vendorName,
+          rawDescription: item.rawDescription,
+          unit: item.unit,
+          packSize: item.packSize,
+          unitPrice: item.unitPrice,
+          quantity: item.quantity,
+          measure: lineMeasure,
+          conflicts: measuresConflict(productMeasure, lineMeasure),
+        });
+      }
+    }
+
+    lines.sort((a, b) => (a.invoiceDate || '').localeCompare(b.invoiceDate || ''));
+    res.json({ product, productMeasure, lines });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * The opposite of a merge: takes chosen invoice lines out of a product and gives them a
+ * product of their own.
+ *
+ * Needed because the matcher occasionally glues two different goods together - a drum of
+ * bleach inside the box of table salt, maltose inside the coconut milk. Those rows poison
+ * the price history of the product they landed in, and there was no way to take them out
+ * again other than re-importing everything.
+ *
+ * Both sides are rebuilt from the invoices afterwards, so the product that lost rows no
+ * longer quotes a price that belongs to something else.
+ */
+app.post('/api/catalog/split', (req, res) => {
+  try {
+    const {
+      productId,
+      lineRefs,
+      targetProductId,
+      newProduct,
+    } = req.body as {
+      productId?: string;
+      lineRefs?: { invoiceId: string; itemId: string }[];
+      targetProductId?: string;
+      newProduct?: { name?: string; unit?: string; packSize?: string; category?: string; sku?: string };
+    };
+
+    if (!productId) return res.status(400).json({ error: 'productId is required' });
+    if (!Array.isArray(lineRefs) || lineRefs.length === 0) {
+      return res.status(400).json({ error: 'Select at least one line to split off' });
+    }
+
+    const source = db.getMasterProduct(productId);
+    if (!source) return res.status(404).json({ error: 'Product not found' });
+
+    // Resolve the requested lines up front: nothing is written until every one of them is
+    // known to exist, so a typo cannot leave half a split behind.
+    const found: { invoice: any; item: InvoiceItem }[] = [];
+    for (const ref of lineRefs) {
+      const invoice = db.getInvoice(ref.invoiceId);
+      const item = invoice?.items.find((it) => it.id === ref.itemId);
+      if (!invoice || !item) {
+        return res.status(404).json({ error: `Line ${ref.itemId} was not found` });
+      }
+      if (item.masterProductId !== source.id) {
+        return res.status(400).json({
+          error: `"${item.rawDescription}" already belongs to another product`,
+        });
+      }
+      found.push({ invoice, item });
+    }
+
+    const remaining = found.length === countLines(source.id);
+    if (remaining) {
+      return res.status(400).json({
+        error: `"${source.name}" has only those lines - there is nothing left to keep. Use rename instead.`,
+      });
+    }
+
+    let target = targetProductId ? db.getMasterProduct(targetProductId) : undefined;
+    if (targetProductId && !target) {
+      return res.status(404).json({ error: 'Target product not found' });
+    }
+
+    if (!target) {
+      // The longest surviving description is usually the fullest name on an invoice line;
+      // anything shorter tends to be an abbreviation OCR salvaged from a torn corner.
+      const seedName = found
+        .map((f) => (f.item.rawDescription || '').trim())
+        .sort((a, b) => b.length - a.length)[0];
+      const seed = found.find((f) => (f.item.rawDescription || '').trim() === seedName)?.item;
+
+      target = {
+        id: `mp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        sku: newProduct?.sku || seed?.supplierSku?.trim() || `SPLIT-${Date.now().toString().slice(-5)}`,
+        name: (newProduct?.name || seedName || 'Split product').trim(),
+        category: newProduct?.category || guessCategory(newProduct?.name || seedName || ''),
+        standardUnit: newProduct?.unit || seed?.unit || 'ea',
+        standardPackSize: newProduct?.packSize ?? seed?.packSize ?? undefined,
+        currentPrice: seed?.unitPrice ?? 0,
+        previousPrice: seed?.unitPrice ?? 0,
+        minPrice: seed?.unitPrice ?? 0,
+        maxPrice: seed?.unitPrice ?? 0,
+        lastPurchaseDate: seed ? found[0].invoice.invoiceDate : new Date().toISOString(),
+        primaryVendor: found[0].invoice.vendorName,
+        vendorAliases: [],
+        priceHistory: [],
+      } as MasterProduct;
+      db.saveMasterProduct(target);
+    }
+
+    for (const { invoice, item } of found) {
+      if (item.packSize) learnPackHierarchy(target as MasterProduct, item.packSize);
+
+      const exists = (target as MasterProduct).vendorAliases.some(
+        (a) => a.aliasName.toLowerCase() === item.rawDescription.trim().toLowerCase()
+      );
+      if (!exists) {
+        (target as MasterProduct).vendorAliases.push({
+          vendorName: invoice.vendorName,
+          aliasName: item.rawDescription.trim(),
+          supplierSku: item.supplierSku || undefined,
+          packSize: item.packSize || undefined,
+          lastSeen: invoice.invoiceDate,
+        });
+      }
+
+      item.masterProductId = (target as MasterProduct).id;
+      item.masterProductName = (target as MasterProduct).name;
+      item.needsMappingReview = false;
+      item.matchConfidence = 1;
+      item.matchTier = 'manual';
+
+      const cmp = compareAgainstHistory(
+        target as MasterProduct,
+        item.unitPrice,
+        item.unit,
+        invoice.invoiceNumber,
+        invoice.invoiceDate
+      );
+      item.previousPrice = cmp.previousPrice;
+      item.priceDelta = cmp.deltaAmount;
+      item.priceDeltaPercent = cmp.percentChange;
+      item.baseUnitPrice = cmp.baseUnitPrice;
+      item.baseUnit = cmp.baseUnit;
+      item.priceComparable = cmp.comparable;
+
+      db.updateInvoice(invoice.id, invoice);
+    }
+
+    // Both products are now re-derived from the invoices, so the one that lost these rows
+    // stops quoting their prices, and every affected line is re-judged by the rule the
+    // upload pipeline uses. No manual history writing: one rebuild, one source of truth.
+    const touchedInvoices = new Set(found.map((f) => f.invoice.id));
+    refreshProductFromInvoices(source.id);
+    refreshProductFromInvoices((target as MasterProduct).id);
+    for (const invoiceId of touchedInvoices) {
+      refreshLineComparisons(invoiceId);
+    }
+
+    let alertsMoved = 0;
+    for (const alert of db.getAlerts()) {
+      const stillOwnsLine = found.some((f) => f.invoice.id === alert.invoiceId);
+      if (alert.masterProductId === source.id && stillOwnsLine) {
+        const stillHere = db
+          .getInvoice(alert.invoiceId)
+          ?.items.some((it) => it.masterProductId === source.id);
+        if (!stillHere) {
+          db.updateAlert(alert.id, {
+            masterProductId: (target as MasterProduct).id,
+            productName: (target as MasterProduct).name,
+          });
+          alertsMoved++;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      source: db.getMasterProduct(source.id),
+      target: db.getMasterProduct((target as MasterProduct).id),
+      movedLines: found.length,
+      alertsMoved,
+      createdNew: !targetProductId,
+    });
+  } catch (err: any) {
+    console.error('Split failed:', err);
+    res.status(500).json({ error: err.message || 'Split failed' });
   }
 });
 

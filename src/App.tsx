@@ -18,6 +18,7 @@ import {
   VendorSummary,
   LineItemPatch,
   LineItemUpdateResult,
+  ProductLinesPayload,
 } from './types/index.ts';
 import {
   FileText,
@@ -177,6 +178,45 @@ export default function App() {
       return errJson.error || `Merge failed (${res.status})`;
     } catch (err: any) {
       return err?.message || 'Merge failed';
+    }
+  };
+
+  /** Every invoice line a master product owns, each flagged when its unit clashes. */
+  const handleFetchProductLines = async (productId: string): Promise<ProductLinesPayload | null> => {
+    try {
+      const res = await fetch(apiUrl(`/api/catalog/${productId}/lines`));
+      if (!res.ok) return null;
+      return (await res.json()) as ProductLinesPayload;
+    } catch (err) {
+      console.error('Failed to load product lines:', err);
+      return null;
+    }
+  };
+
+  /**
+   * Takes the given lines out of a product and gives them a product of their own (or moves
+   * them into one the user names). Returns the server's reason if the split was refused.
+   */
+  const handleSplitProduct = async (payload: {
+    productId: string;
+    lineRefs: { invoiceId: string; itemId: string }[];
+    targetProductId?: string;
+    newProduct?: { name?: string; unit?: string; packSize?: string; category?: string };
+  }): Promise<string | null> => {
+    try {
+      const res = await fetch(apiUrl('/api/catalog/split'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        await loadData();
+        return null;
+      }
+      const errJson = await res.json().catch(() => ({}));
+      return errJson.error || `Split failed (${res.status})`;
+    } catch (err: any) {
+      return err?.message || 'Split failed';
     }
   };
 
@@ -419,6 +459,8 @@ export default function App() {
                 onApproveMatch={handleApproveMatch}
                 onBulkApprove={handleBulkApprove}
                 onMergeProducts={handleMergeProducts}
+                onFetchProductLines={handleFetchProductLines}
+                onSplitProduct={handleSplitProduct}
                 onViewProductTrends={handleViewProductTrends}
                 onRebuildPriceHistory={handleRebuildPriceHistory}
               />
