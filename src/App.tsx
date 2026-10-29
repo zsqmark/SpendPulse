@@ -9,6 +9,8 @@ import { AIChatCopilot } from './components/AIChatCopilot.tsx';
 import { FolderMonitor } from './components/FolderMonitor.tsx';
 import { ExportModal } from './components/ExportModal.tsx';
 import { ScanModal } from './components/ScanModal.tsx';
+import { AlignmentReview } from './components/AlignmentReview.tsx';
+import type { HeaderTab } from './components/Header.tsx';
 import { apiUrl } from './lib/apiBase.ts';
 import {
   Invoice,
@@ -44,7 +46,9 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'invoices' | 'alerts' | 'catalog' | 'trends' | 'vendors' | 'chat'>('invoices');
+  const [activeTab, setActiveTab] = useState<HeaderTab>('invoices');
+  /** Alignments waiting on the owner. Drives the badge in the header. */
+  const [alignmentConflicts, setAlignmentConflicts] = useState(0);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [masterProducts, setMasterProducts] = useState<MasterProduct[]>([]);
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
@@ -66,12 +70,13 @@ export default function App() {
 
   const loadData = async () => {
     try {
-      const [invRes, catRes, alertRes, statsRes, vendorRes] = await Promise.all([
+      const [invRes, catRes, alertRes, statsRes, vendorRes, alignRes] = await Promise.all([
         safeJson('/api/invoices'),
         safeJson('/api/catalog'),
         safeJson('/api/alerts'),
         safeJson('/api/stats'),
         safeJson('/api/vendors'),
+        safeJson('/api/alignment/review'),
       ]);
 
       setInvoices(Array.isArray(invRes) ? invRes : []);
@@ -79,6 +84,7 @@ export default function App() {
       setAlerts(Array.isArray(alertRes) ? alertRes : []);
       setStats(statsRes ?? null);
       setVendors(Array.isArray(vendorRes) ? vendorRes : []);
+      setAlignmentConflicts(alignRes?.total ?? 0);
     } catch (err) {
       console.error('Failed to load initial data:', err);
     } finally {
@@ -447,6 +453,7 @@ export default function App() {
         setActiveTab={setActiveTab}
         activeAlertCount={activeAlertCount}
         reviewItemsCount={reviewItemsCount}
+        alignmentConflicts={alignmentConflicts}
         onOpenExport={() => setIsExportModalOpen(true)}
         onOpenUpload={() => setIsScanModalOpen(true)}
       />
@@ -579,6 +586,14 @@ export default function App() {
                 unitApi={unitApi}
                 onViewProductTrends={handleViewProductTrends}
                 onRebuildPriceHistory={handleRebuildPriceHistory}
+              />
+            )}
+
+            {activeTab === 'alignment' && (
+              <AlignmentReview
+                onResolved={() => {
+                  loadData();
+                }}
               />
             )}
 

@@ -1,11 +1,22 @@
 import React from 'react';
-import { ShieldAlert, Database, Sparkles, FolderSync, PlusCircle, Building2 } from 'lucide-react';
+import { ShieldAlert, Database, Sparkles, FolderSync, PlusCircle, Building2, History } from 'lucide-react';
+
+export type HeaderTab =
+  | 'invoices'
+  | 'alerts'
+  | 'catalog'
+  | 'alignment'
+  | 'trends'
+  | 'vendors'
+  | 'chat';
 
 interface HeaderProps {
-  activeTab: 'invoices' | 'alerts' | 'catalog' | 'trends' | 'vendors' | 'chat';
-  setActiveTab: (tab: 'invoices' | 'alerts' | 'catalog' | 'trends' | 'vendors' | 'chat') => void;
+  activeTab: HeaderTab;
+  setActiveTab: (tab: HeaderTab) => void;
   activeAlertCount: number;
   reviewItemsCount: number;
+  /** Alignments nobody could settle on their own. */
+  alignmentConflicts?: number;
   onOpenExport: () => void;
   onOpenUpload: () => void;
 }
@@ -15,6 +26,7 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveTab,
   activeAlertCount,
   reviewItemsCount,
+  alignmentConflicts = 0,
   onOpenExport,
   onOpenUpload,
 }) => {
@@ -80,6 +92,23 @@ export const Header: React.FC<HeaderProps> = ({
               {reviewItemsCount > 0 && (
                 <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
                   {reviewItemsCount} review
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab('alignment')}
+              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+                activeTab === 'alignment'
+                  ? 'bg-slate-800 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
+              }`}
+            >
+              <History className="w-3.5 h-3.5 text-violet-400" />
+              <span>Alignment</span>
+              {alignmentConflicts > 0 && (
+                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  {alignmentConflicts}
                 </span>
               )}
             </button>
@@ -166,6 +195,15 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             Catalog {reviewItemsCount > 0 && `(${reviewItemsCount})`}
+          </button>
+          <button
+            onClick={() => setActiveTab('alignment')}
+            className={`px-2.5 py-1 text-xs rounded whitespace-nowrap flex items-center gap-1 ${
+              activeTab === 'alignment' ? 'bg-slate-800 text-white' : 'text-slate-400'
+            }`}
+          >
+            <History className="w-3 h-3 text-violet-400" />
+            Align {alignmentConflicts > 0 && `(${alignmentConflicts})`}
           </button>
           <button
             onClick={() => setActiveTab('trends')}

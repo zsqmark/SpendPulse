@@ -23,6 +23,8 @@ import {
   X,
   Info,
   Save,
+  History,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   UNIT_OPTIONS,
@@ -32,7 +34,12 @@ import {
 } from '../lib/units.ts';
 import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
 import { describeNotComparable } from '../lib/comparisonReason.ts';
-import type { LineItemPatch, LineItemUpdateResult } from '../types/index.ts';
+import { describeFieldAlignment } from '../lib/alignmentLabels.ts';
+import type {
+  LineAlignment,
+  LineItemPatch,
+  LineItemUpdateResult,
+} from '../types/index.ts';
 
 interface InvoicesViewProps {
   invoices: Invoice[];
@@ -65,6 +72,49 @@ const NotComparedCell: React.FC<{ code?: string | null; detail?: string | null }
         Not compared
       </span>
       <span className="text-[10px] text-slate-600 leading-tight">{label}</span>
+    </span>
+  );
+};
+
+/**
+ * Where the values on this line came from.
+ *
+ * A line whose unit was quietly rewritten is indistinguishable from one the supplier
+ * printed that way, which is exactly the kind of thing that later looks like a bug. So
+ * anything history touched is marked here, with the full explanation in the tooltip.
+ */
+const AlignmentBadge: React.FC<{ alignment?: LineAlignment | null }> = ({ alignment }) => {
+  if (!alignment) return null;
+
+  const moved = alignment.fields.filter((f) => f.source === 'history' || f.source === 'converted');
+  if (moved.length === 0 && alignment.conflicts.length === 0) return null;
+
+  const details = alignment.fields
+    .filter((f) => f.source !== 'document' || f.conflict)
+    .map((f) => describeFieldAlignment(f).detail);
+  if (alignment.conflicts.length > 0) {
+    details.push(...alignment.conflicts.map((c) => c.reason));
+  }
+
+  const flagged = alignment.conflicts.length > 0;
+
+  return (
+    <span
+      title={details.join('\n')}
+      className={`px-1.5 py-0.2 rounded border text-[10px] font-mono inline-flex items-center gap-1 ${
+        flagged
+          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+          : 'bg-violet-500/10 text-violet-300 border-violet-500/25'
+      }`}
+    >
+      {flagged ? (
+        <AlertTriangle className="w-2.5 h-2.5" />
+      ) : (
+        <History className="w-2.5 h-2.5" />
+      )}
+      {flagged
+        ? `needs a decision (${alignment.conflicts.length})`
+        : `aligned (${moved.length})`}
     </span>
   );
 };
@@ -693,6 +743,7 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                                   </span>
                                 )}
                                 <span className="text-slate-500">Unit: {item.unit}</span>
+                                <AlignmentBadge alignment={item.alignment} />
                               </div>
                               {/* The whole point of the pack hierarchy: what this line
                                   actually costs once it is reduced to one base measure. */}

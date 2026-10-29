@@ -7,6 +7,15 @@ import { db } from './src/server/storage.ts';
 import { mergeDuplicateLineItems, extractInvoicesFromDocument } from './src/server/ocrService.ts';
 import { batchMatchItems, guessCategory } from './src/server/aliasMatcher.ts';
 import {
+  alignLine,
+  identityFor,
+  lookupKeysFor,
+  majorityOf,
+  rememberSample,
+  sampleFromOutcome,
+  unitConversionFactor,
+} from './src/server/lineAlignment.ts';
+import {
   checkAndRecordPriceChange,
   compareAgainstHistory,
   revalidateActiveAlerts,
@@ -40,6 +49,9 @@ import {
   ProductUnitLine,
   UnitChangePreview,
   UnitChangeLineSnapshot,
+  AlignmentLogEntry,
+  ProductAttributeRecord,
+  LineAlignment,
 } from './src/types/index.ts';
 import { standardPrice } from './src/lib/standardPricing.ts';
 import { isMeatDescription } from './src/lib/meatPricing.ts';
@@ -102,6 +114,37 @@ function invoiceSummary(inv: Invoice) {
     itemCount: inv.itemCount,
     importedAt: inv.createdAt,
   };
+}
+
+/**
+ * Takes one invoice out of the alignment history library.
+ *
+ * A sample is stored per invoice number, so dropping the invoice's own samples puts every
+ * record back exactly where it was before that invoice arrived - the same guarantee the
+ * sample-per-invoice design gives a repeated upload.
+ */
+function forgetInvoiceFromAttributes(invoiceNumber: string, vendorName: string): number {
+  const key = String(invoiceNumber || '').trim();
+  if (!key) return 0;
+
+  const kept: ProductAttributeRecord[] = [];
+  const empty: string[] = [];
+  let removed = 0;
+
+  for (const record of db.getProductAttributes()) {
+    if (record.vendorName !== vendorName) continue;
+    const before = record.samples.length;
+    record.samples = record.samples.filter((s) => String(s.invoiceNumber || '').trim() !== key);
+    if (record.samples.length === before) continue;
+    removed += before - record.samples.length;
+    // A record with no samples left has no history to offer, so it goes too.
+    if (record.samples.length === 0) empty.push(record.key);
+    else kept.push(record);
+  }
+
+  if (kept.length > 0) db.saveProductAttributes(kept);
+  for (const k of empty) db.deleteProductAttribute(k);
+  return removed;
 }
 
 /**
@@ -259,6 +302,11 @@ app.delete('/api/invoices/:id', async (req, res) => {
 
     for (const productId of affectedProductIds) refreshProductFromInvoices(productId);
 
+    // The history library must not keep remembering an invoice that no longer exists,
+    // or the next upload would align against a purchase that was withdrawn.
+    const samplesRemoved = forgetInvoiceFromAttributes(inv.invoiceNumber, inv.vendorName);
+    const alignmentEntriesRemoved = db.pruneAlignmentLog((e) => e.invoiceId !== inv.id);
+
     const orphanIds: string[] = [];
     if (req.query.keepOrphans !== '1') {
       for (const product of db.getMasterProducts()) {
@@ -281,6 +329,8 @@ app.delete('/api/invoices/:id', async (req, res) => {
       alertsRemoved,
       productsRebuilt: affectedProductIds.length,
       orphanProductsRemoved: orphanIds.length,
+      alignmentSamplesRemoved: samplesRemoved,
+      alignmentEntriesRemoved,
     });
   } catch (err: any) {
     console.error('Invoice delete failed:', err);
@@ -291,6 +341,220 @@ app.delete('/api/invoices/:id', async (req, res) => {
 // Original source pages, so extracted values can be checked against the scan.
 app.get('/api/invoices/:id/pages', async (req, res) => {
   res.json(await listInvoicePages(req.params.id));
+});
+
+/* ---------------------------------------------------------------------------
+ * Historical alignment
+ *
+ * Every line of a new invoice is brought onto the values history holds for that
+ * product. What moved is recorded here, and a disagreement nobody could reconcile
+ * waits in the review queue for a human.
+ * ------------------------------------------------------------------------- */
+
+/** The audit trail: what alignment did, newest first. */
+app.get('/api/alignment/log', (req, res) => {
+  const limit = Number(req.query.limit) || 200;
+  const invoiceId = req.query.invoiceId ? String(req.query.invoiceId) : null;
+  const all = db.getAlignmentLog();
+  const rows = invoiceId ? all.filter((e) => e.invoiceId === invoiceId) : all;
+  res.json({ total: all.length, entries: rows.slice(0, limit) });
+});
+
+/** The history library itself, so what alignment is working from can be inspected. */
+app.get('/api/alignment/memory', (req, res) => {
+  const records = db.getProductAttributes();
+  const limit = Number(req.query.limit) || 200;
+  const search = req.query.search ? String(req.query.search).toLowerCase() : '';
+  const rows = search
+    ? records.filter(
+        (r) =>
+          (r.name || '').toLowerCase().includes(search) ||
+          (r.sku || '').toLowerCase().includes(search) ||
+          (r.productName || '').toLowerCase().includes(search)
+      )
+    : records;
+  res.json({
+    total: records.length,
+    records: rows.slice(0, limit).map((r) => ({
+      key: r.key,
+      kind: r.kind,
+      vendorName: r.vendorName,
+      sku: r.sku,
+      name: r.name,
+      packSize: r.packSize,
+      productId: r.productId,
+      productName: r.productName,
+      seenCount: r.samples.length,
+      // What history would answer for each field right now.
+      current: currentFromSamples(r),
+      firstSeenAt: r.firstSeenAt,
+      lastSeenAt: r.lastSeenAt,
+    })),
+  });
+});
+
+/** What history currently holds for each field of one record. */
+function currentFromSamples(record: ProductAttributeRecord): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const field of ['unit', 'packSize', 'taxRate', 'category'] as const) {
+    const seen = (record.samples || [])
+      .map((s) => s.values?.[field])
+      .filter((v): v is string => typeof v === 'string' && v.trim() !== '');
+    out[field] = majorityOf(seen);
+  }
+  return out;
+}
+
+/** The queue: alignments nobody could settle on their own. */
+app.get('/api/alignment/review', (req, res) => {
+  const all = db.getAlignmentLog();
+  const open = all.filter((e) => e.conflicts.length > 0 && !e.resolvedAt);
+  const unresolved = req.query.all === '1' ? open : open.filter((e) => e.needsReview);
+  res.json({
+    total: open.length,
+    entries: unresolved.map((e) => ({
+      id: e.id,
+      invoiceId: e.invoiceId,
+      invoiceNumber: e.invoiceNumber,
+      vendorName: e.vendorName,
+      itemId: e.itemId,
+      itemDescription: e.itemDescription,
+      productId: e.productId,
+      productName: e.productName,
+      identityKey: e.identityKey,
+      identityKind: e.identityKind,
+      isFirstEntry: e.isFirstEntry,
+      changes: e.changes,
+      conflicts: e.conflicts,
+      createdAt: e.createdAt,
+    })),
+  });
+});
+
+/**
+ * Settles one conflict.
+ *
+ * 'accepted_history' writes the historical value onto the line (and, when the field is
+ * the unit, converts the price by the same factor so the price per base unit does not
+ * move). 'kept_document' just closes the item and leaves the printed value alone.
+ */
+app.post('/api/alignment/:logId/resolve', (req, res) => {
+  const entry = db.getAlignmentLog().find((e) => e.id === req.params.logId);
+  if (!entry) return res.status(404).json({ error: 'Alignment entry not found' });
+  if (entry.resolvedAt) {
+    return res.status(409).json({ error: 'This alignment has already been settled.' });
+  }
+
+  const resolution = req.body?.resolution;
+  if (resolution !== 'accepted_history' && resolution !== 'kept_document') {
+    return res.status(400).json({ error: "resolution must be 'accepted_history' or 'kept_document'" });
+  }
+
+  const invoice = db.getInvoice(entry.invoiceId);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  const item = (invoice.items || []).find((i) => i.id === entry.itemId);
+  if (!item) return res.status(404).json({ error: 'Line not found' });
+
+  let applied: string | null = null;
+  if (resolution === 'accepted_history') {
+    for (const conflict of entry.conflicts) {
+      const historyValue = conflict.historyValue;
+      if (historyValue == null) continue;
+
+      if (conflict.field === 'unit') {
+        const factor = unitConversionFactor(
+          item.unit,
+          historyValue,
+          item.packSize,
+          entry.productId ? db.getMasterProduct(entry.productId) ?? null : null
+        );
+        if (factor == null || !(factor > 0)) {
+          return res.status(400).json({
+            error: `No conversion between ${item.unit} and ${historyValue}, so the historical unit cannot be applied.`,
+          });
+        }
+        item.unit = historyValue;
+        item.unitPrice = Number((item.unitPrice * factor).toFixed(4));
+      } else if (conflict.field === 'packSize') {
+        item.packSize = historyValue;
+      } else if (conflict.field === 'taxRate') {
+        item.taxRate = Number(historyValue);
+      } else if (conflict.field === 'category') {
+        item.category = historyValue;
+      }
+      applied = historyValue;
+    }
+  }
+
+  // The line's own alignment record is refreshed so it does not keep claiming a
+  // conflict that a human has just settled.
+  if (item.alignment) {
+    item.alignment.conflicts = [];
+    item.alignment.needsReview = false;
+    for (const f of item.alignment.fields) {
+      if (f.conflict && resolution === 'accepted_history' && f.historyValue != null) {
+        f.value = f.historyValue;
+        f.source = 'history';
+      }
+      f.conflict = false;
+    }
+  }
+
+  db.updateInvoice(invoice.id, { items: invoice.items });
+  db.updateAlignmentLogEntry(entry.id, {
+    resolvedAt: new Date().toISOString(),
+    resolution,
+    resolvedValue: applied,
+  });
+
+  // Re-derive the price history, because a resolved unit can move the price.
+  if (item.masterProductId) refreshProductFromInvoices(item.masterProductId);
+
+  res.json({ success: true, resolution, appliedValue: applied, item });
+});
+
+/**
+ * Rebuilds the history library from the invoices that are stored.
+ *
+ * Safe to run at any time: samples are keyed by invoice number, so replaying produces
+ * exactly the same records the original import did. It is the way to repair the library
+ * after an alignment rule changes.
+ */
+app.post('/api/alignment/replay', (req, res) => {
+  const before = db.getProductAttributes().length;
+  const rebuilt = new Map<string, ProductAttributeRecord>();
+  let lines = 0;
+
+  for (const invoice of db.getInvoices()) {
+    for (const item of invoice.items || []) {
+      if (!item.alignment) continue;
+      const record: ProductAttributeRecord = rebuilt.get(item.alignment.identityKey) || {
+        key: item.alignment.identityKey,
+        kind: item.alignment.identityKind === 'sku' ? 'sku' : 'name_spec',
+        vendorName: invoice.vendorName,
+        sku: item.supplierSku ?? null,
+        name: item.rawDescription,
+        packSize: item.packSize ?? null,
+        productId: item.masterProductId ?? null,
+        productName: item.masterProductName ?? null,
+        samples: [],
+        firstSeenAt: invoice.createdAt,
+        lastSeenAt: invoice.createdAt,
+      };
+      const values: Partial<Record<'unit' | 'packSize' | 'taxRate' | 'category', string | null>> = {};
+      for (const f of item.alignment.fields) values[f.field] = f.value ?? null;
+      rememberSample(
+        record,
+        { invoiceNumber: invoice.invoiceNumber, invoiceDate: invoice.invoiceDate, values },
+        invoice.createdAt
+      );
+      rebuilt.set(record.key, record);
+      lines += 1;
+    }
+  }
+
+  db.replaceProductAttributes(Array.from(rebuilt.values()));
+  res.json({ success: true, linesReplayed: lines, recordsBefore: before, recordsAfter: rebuilt.size });
 });
 
 app.get('/api/invoices/:id/pages/:pageNumber', async (req, res) => {
@@ -348,6 +612,9 @@ app.post('/api/invoices/process', async (req, res) => {
     const alertsCreated: PriceAlert[] = [];
     const duplicateSummaries: any[] = [];
     let needsReview = false;
+    /** Lines whose values were filled in or moved by history, and how many are disputed. */
+    let alignmentApplied = 0;
+    let alignmentConflicts = 0;
 
     for (const { result: extracted, pages: groupPages } of extractedGroups) {
       // Clean the supplier name before it is stored or used for dedupe, so "T & D TRADING
@@ -420,7 +687,13 @@ app.post('/api/invoices/process', async (req, res) => {
         if (!productsBefore.has(p.id)) pricedInThisInvoice.add(p.id);
       }
 
-      // Step 2: Canonicalize each line item & check price change
+      // Step 2: Align each line against history, then check its price.
+      /** History records this invoice touched, written back once after the loop. */
+      const touchedAttributes = new Map<string, ProductAttributeRecord>();
+      const alignmentEntries: AlignmentLogEntry[] = [];
+      let hasAlignmentConflicts = false;
+      const alignedAt = new Date().toISOString();
+
       for (const it of rawItemsForBatch) {
         const match = batchMatches[it.id] || {
           masterProductId: null,
@@ -431,6 +704,105 @@ app.post('/api/invoices/process', async (req, res) => {
           reasoning: 'Unmapped',
           confidenceBreakdown: { skuMatch: false, packMatch: false, nameScore: 0 },
         };
+
+        const product = match.masterProductId
+          ? db.getMasterProduct(match.masterProductId) ?? null
+          : null;
+
+        // Historical alignment. The lookup keys are tried item code first, then
+        // name + pack size, which is the order the owner asked for.
+        const alignmentInput = {
+          itemId: it.id,
+          rawDescription: it.rawDescription,
+          supplierSku: it.supplierSku,
+          packSize: it.packSize,
+          unit: it.unit,
+          unitPrice: it.unitPrice,
+          vendorName: extracted.vendorName,
+          invoiceId,
+          invoiceNumber: extracted.invoiceNumber,
+          invoiceDate: extracted.invoiceDate,
+          product,
+          weightPriced: isMeatDescription(it.rawDescription, it.brand),
+        };
+        const lookupKeys = lookupKeysFor(alignmentInput);
+        const found = db.findProductAttribute(lookupKeys);
+        const aligned = alignLine(alignmentInput, {
+          record: found?.record ?? null,
+          recordKind: found?.kind ?? null,
+        });
+        const alignment: LineAlignment = aligned.alignment;
+
+        // Fold the line back into the history library so the next invoice aligns against
+        // it. A sample is stored per invoice number, so re-processing this invoice
+        // replaces its own sample instead of adding a second one.
+        const identity = identityFor(alignmentInput);
+        const target = found
+          ? { key: found.record.key, kind: found.kind }
+          : { key: identity.key, kind: identity.kind };
+        let record = db.getProductAttribute(target.key) ?? touchedAttributes.get(target.key);
+        if (!record) {
+          record = {
+            key: target.key,
+            kind: target.kind,
+            vendorName: extracted.vendorName || '',
+            sku: it.supplierSku ?? null,
+            name: it.rawDescription,
+            packSize: it.packSize ?? null,
+            productId: product?.id ?? null,
+            productName: product?.name ?? null,
+            samples: [],
+            firstSeenAt: alignedAt,
+            lastSeenAt: alignedAt,
+          };
+        }
+        rememberSample(
+          record,
+          {
+            invoiceNumber: extracted.invoiceNumber || '',
+            invoiceDate: extracted.invoiceDate ?? null,
+            values: sampleFromOutcome(aligned),
+          },
+          alignedAt
+        );
+        if (product) {
+          record.productId = product.id;
+          record.productName = product.name;
+        }
+        touchedAttributes.set(record.key, record);
+
+        if (alignment.conflicts.length > 0) hasAlignmentConflicts = true;
+
+        // Only what actually moved is worth an audit line; a row that simply agreed with
+        // history would bury the few that did not.
+        const changes = alignment.fields.filter(
+          (f) => f.source === 'history' || f.source === 'converted' || f.conflict
+        );
+        if (changes.length > 0) {
+          alignmentEntries.push({
+            id: `al-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            invoiceId,
+            invoiceNumber: extracted.invoiceNumber,
+            vendorName: extracted.vendorName,
+            itemId: it.id,
+            itemDescription: it.rawDescription,
+            productId: product?.id ?? null,
+            productName: product?.name ?? null,
+            identityKey: target.key,
+            identityKind: alignment.identityKind,
+            isFirstEntry: alignment.isFirstEntry,
+            changes,
+            conflicts: alignment.conflicts,
+            needsReview: alignment.needsReview,
+            validated: alignment.validated,
+            validationErrors: alignment.validationErrors,
+            fingerprint: alignment.fingerprint,
+            resolvedAt: null,
+            resolution: null,
+            resolvedValue: null,
+            createdAt: alignedAt,
+          });
+        }
 
         let priceCheck: any = {
           hasPriceIncrease: false,
@@ -445,9 +817,9 @@ app.post('/api/invoices/process', async (req, res) => {
         if (match.masterProductId && !match.needsMappingReview) {
           priceCheck = checkAndRecordPriceChange({
             masterProductId: match.masterProductId,
-            unitPrice: it.unitPrice,
-            unit: it.unit,
-            packSize: it.packSize,
+            unitPrice: aligned.unitPrice,
+            unit: aligned.unit,
+            packSize: aligned.packSize ?? undefined,
             vendorName: extracted.vendorName,
             invoiceId,
             invoiceNumber: extracted.invoiceNumber,
@@ -469,13 +841,13 @@ app.post('/api/invoices/process', async (req, res) => {
           rawDescription: it.rawDescription,
           supplierSku: it.supplierSku,
           brand: it.brand,
-          packSize: it.packSize,
+          packSize: aligned.packSize,
           masterProductId: match.needsMappingReview ? null : match.masterProductId,
           masterProductName: match.needsMappingReview ? null : match.masterProductName,
           quantity: it.quantity,
           weight: it.weight ?? null,
-          unit: it.unit,
-          unitPrice: it.unitPrice,
+          unit: aligned.unit,
+          unitPrice: aligned.unitPrice,
           totalPrice: it.totalPrice,
           previousPrice: priceCheck.previousPrice,
           priceDelta: priceCheck.deltaAmount,
@@ -488,6 +860,9 @@ app.post('/api/invoices/process', async (req, res) => {
           standardUnitPrice: null,
           standardUnit: null,
           standardSellingUnit: null,
+          taxRate: aligned.taxRate,
+          category: aligned.category,
+          alignment,
           matchConfidence: match.confidence,
           matchTier: match.matchTier,
           needsMappingReview: match.needsMappingReview,
@@ -498,6 +873,14 @@ app.post('/api/invoices/process', async (req, res) => {
           mergedCount: it.mergedCount,
         });
         attachStandardPricing(processedItems[processedItems.length - 1]);
+      }
+
+      // One write for the whole invoice instead of one per line.
+      if (touchedAttributes.size > 0) {
+        db.saveProductAttributes(Array.from(touchedAttributes.values()));
+      }
+      if (alignmentEntries.length > 0) {
+        db.addAlignmentLogEntries(alignmentEntries);
       }
 
       const newInvoice: Invoice = {
@@ -511,7 +894,9 @@ app.post('/api/invoices/process', async (req, res) => {
         taxAmount: extracted.taxAmount,
         totalAmount: extracted.totalAmount,
         currency: extracted.currency || 'USD',
-        status: hasUnmappedItems ? 'needs_review' : 'processed',
+        // A line history could not agree with is left as printed and waits for a human,
+        // which is exactly what "needs review" is for.
+        status: hasUnmappedItems || hasAlignmentConflicts ? 'needs_review' : 'processed',
         items: processedItems,
         itemCount: processedItems.length,
         pageCount: extracted.pageCount || 1,
@@ -538,7 +923,9 @@ app.post('/api/invoices/process', async (req, res) => {
 
       db.addInvoice(newInvoice);
       invoices.push(newInvoice);
-      if (hasUnmappedItems) needsReview = true;
+      if (hasUnmappedItems || hasAlignmentConflicts) needsReview = true;
+      alignmentConflicts += alignmentEntries.reduce((n, e) => n + e.conflicts.length, 0);
+      alignmentApplied += alignmentEntries.length;
     }
 
     const primaryInvoice = invoices[0] || null;
@@ -551,6 +938,7 @@ app.post('/api/invoices/process', async (req, res) => {
       alertsCreated,
       duplicates: duplicateSummaries,
       needsReview,
+      alignment: { applied: alignmentApplied, conflicts: alignmentConflicts },
     });
   } catch (err: any) {
     console.error('Invoice processing error:', err);

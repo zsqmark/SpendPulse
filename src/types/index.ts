@@ -60,6 +60,160 @@ export interface InvoiceItem {
   standardUnit?: 'L' | 'kg' | 'ea' | null;
   /** What the supplier counts the goods in - 按瓶 'bottle' | 按包 'bag' | 按个 'ea'. */
   standardSellingUnit?: 'bottle' | 'bag' | 'ea' | null;
+  /** Tax rate printed for this line, when the supplier states one. */
+  taxRate?: number | null;
+  /** Category this line was filed under by alignment, inherited from the catalogue. */
+  category?: string | null;
+  /** What historical alignment did to this line, and why. Kept with the line so the
+   *  invoice view can show where each value came from without a round trip. */
+  alignment?: LineAlignment | null;
+}
+
+/* ---------------------------------------------------------------------------
+ * Historical alignment
+ *
+ * A new invoice is compared against what the same product looked like the last
+ * time it was bought, and the fields that must stay consistent across invoices
+ * (unit, pack size, tax rate, category) are aligned to the historical value.
+ * What the document actually printed is never thrown away.
+ * ------------------------------------------------------------------------- */
+
+/** The fields alignment is allowed to touch. */
+export const ALIGNED_FIELDS = ['unit', 'packSize', 'taxRate', 'category'] as const;
+export type AlignedField = (typeof ALIGNED_FIELDS)[number];
+
+/** Where the value now on the line came from. */
+export type AlignmentSource =
+  /** The document printed it and history agreed, or history had nothing to say. */
+  | 'document'
+  /** The document left it blank and history filled it in. */
+  | 'history'
+  /** The two disagreed but were convertible, so the document value was converted. */
+  | 'converted'
+  /** Neither side had a value. */
+  | 'empty';
+
+/** How the line was identified against history. */
+export type AlignmentIdentityKind =
+  /** Matched on the supplier's own item code. */
+  | 'sku'
+  /** Matched on normalised name + pack size. */
+  | 'name_spec'
+  /** No history at all - this is the first time the product has been seen. */
+  | 'new';
+
+/** What happened to one field. */
+export interface FieldAlignment {
+  field: AlignedField;
+  /** The value written to the line. Null when neither side had one. */
+  value: string | null;
+  /** Exactly what the document printed, kept for audit. Never overwritten by alignment. */
+  documentValue: string | null;
+  /** What history said, before any conversion. */
+  historyValue: string | null;
+  source: AlignmentSource;
+  /** True when the document and history disagreed. */
+  conflict: boolean;
+  /** Set when the disagreement was reconciled by converting the document value. */
+  convertedFrom?: string | null;
+  /** The factor the value was multiplied by to reach 'value'. */
+  conversionFactor?: number | null;
+  /** Why a conflict could not be reconciled, in plain English. */
+  note?: string | null;
+}
+
+/** A disagreement that a human has to settle. */
+export interface AlignmentConflict {
+  field: AlignedField;
+  documentValue: string | null;
+  historyValue: string | null;
+  reason: string;
+  /**
+   * 'kept_document' - no conversion exists, so the printed value was left alone.
+   * 'accepted_history' - the historical value was applied; nothing numeric was at stake.
+   */
+  resolution: 'kept_document' | 'accepted_history';
+}
+
+/** The result of aligning one line, stored on the line itself. */
+export interface LineAlignment {
+  /** The key history was looked up under, e.g. "sku:t & d trading pty ltd|cm22b". */
+  identityKey: string;
+  identityKind: AlignmentIdentityKind;
+  /** Null on a first sighting. */
+  matchedProductId?: string | null;
+  /** True when nothing was found in history - the line seeds it instead. */
+  isFirstEntry: boolean;
+  fields: FieldAlignment[];
+  conflicts: AlignmentConflict[];
+  /** True when a conflict is waiting for a human, or validation refused the result. */
+  needsReview: boolean;
+  /** The unit price the document printed, before any conversion moved it. */
+  originalUnitPrice?: number | null;
+  /** False when the aligned result failed its pre-write checks and was discarded. */
+  validated: boolean;
+  validationErrors: string[];
+  /**
+   * A hash of the whole outcome. Re-processing the same document produces the same
+   * fingerprint, which is how a repeated upload is recognised instead of logged twice.
+   */
+  fingerprint: string;
+  alignedAt: string;
+}
+
+/** One line's alignment, as an audit record. */
+export interface AlignmentLogEntry {
+  id: string;
+  invoiceId: string;
+  invoiceNumber: string;
+  vendorName: string;
+  itemId: string;
+  itemDescription: string;
+  productId?: string | null;
+  productName?: string | null;
+  identityKey: string;
+  identityKind: AlignmentIdentityKind;
+  isFirstEntry: boolean;
+  /** Only the fields that were filled in or moved. */
+  changes: FieldAlignment[];
+  conflicts: AlignmentConflict[];
+  needsReview: boolean;
+  validated: boolean;
+  validationErrors: string[];
+  fingerprint: string;
+  /** Set when a human settles the conflict; the chosen value is recorded verbatim. */
+  resolvedAt?: string | null;
+  resolution?: 'accepted_history' | 'kept_document' | null;
+  resolvedValue?: string | null;
+  createdAt: string;
+}
+
+/**
+ * The history library: what a product has consistently looked like, keyed by the
+ * identity that found it. Every field keeps every value ever observed, so a value
+ * that OCR flips between cannot take the record with it.
+ */
+export interface ProductAttributeRecord {
+  key: string;
+  kind: 'sku' | 'name_spec';
+  vendorName: string;
+  sku?: string | null;
+  name?: string | null;
+  packSize?: string | null;
+  productId?: string | null;
+  productName?: string | null;
+  /**
+   * One entry per invoice the identity has been seen on, newest appended. Re-processing
+   * an invoice REPLACES its entry rather than adding another, which is what keeps a
+   * repeated upload from skewing the record.
+   */
+  samples: {
+    invoiceNumber: string;
+    invoiceDate?: string | null;
+    values: Partial<Record<AlignedField, string | null>>;
+  }[];
+  firstSeenAt: string;
+  lastSeenAt: string;
 }
 
 /**
@@ -281,6 +435,11 @@ export interface MasterProduct {
   category: string;
   standardUnit: string;
   standardPackSize?: string;
+  /**
+   * Tax rate the catalogue holds for this product. Filled in from the invoices that
+   * carry one, and used by alignment to populate lines whose supplier left it blank.
+   */
+  taxRate?: number | null;
   /**
    * The measure every price of this product is converted into before it is compared.
    * Absent when the pack description could not be parsed.
