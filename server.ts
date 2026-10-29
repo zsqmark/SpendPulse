@@ -27,6 +27,8 @@ import {
   deleteAllDocuments,
 } from './src/server/documentStore.ts';
 import { Invoice, InvoiceItem, PriceAlert, MasterProduct, VendorSummary } from './src/types/index.ts';
+import { standardPrice } from './src/lib/standardPricing.ts';
+import { isMeatDescription } from './src/lib/meatPricing.ts';
 import { normalizeVendorName, vendorKey } from './src/lib/vendorNormalizer.ts';
 import { measureClassOf, measuresConflict, describeMeasure } from './src/server/unitConversion.ts';
 
@@ -145,8 +147,29 @@ function refreshLineComparisons(invoiceId: string): void {
     item.baseUnitPrice = cmp.baseUnitPrice;
     item.baseUnit = cmp.baseUnit;
     item.priceComparable = cmp.comparable;
+    attachStandardPricing(item);
   }
   db.updateInvoice(invoice.id, invoice);
+}
+
+/**
+ * Re-quotes a line the way the catalogue always shows it: $/L when the name states a
+ * capacity, $/kg when it states a weight, $/ea when it states neither. Meat keeps the
+ * per-kilo price it was given from the invoice's weight column.
+ */
+function attachStandardPricing(item: InvoiceItem): void {
+  const std = standardPrice({
+    rawDescription: item.rawDescription,
+    masterProductName: item.masterProductName,
+    brand: item.brand,
+    packSize: item.packSize,
+    unit: item.unit,
+    unitPrice: item.unitPrice,
+    isMeat: isMeatDescription(item.rawDescription, item.brand),
+  });
+  item.standardUnitPrice = std.price;
+  item.standardUnit = std.unit;
+  item.standardSellingUnit = std.sellingUnit;
 }
 
 /** How many invoice lines currently point at a product. */
@@ -382,6 +405,9 @@ app.post('/api/invoices/process', async (req, res) => {
           baseUnitPrice: priceCheck.baseUnitPrice,
           baseUnit: priceCheck.baseUnit,
           priceComparable: priceCheck.comparable,
+          standardUnitPrice: null,
+          standardUnit: null,
+          standardSellingUnit: null,
           matchConfidence: match.confidence,
           matchTier: match.matchTier,
           needsMappingReview: match.needsMappingReview,
@@ -391,6 +417,7 @@ app.post('/api/invoices/process', async (req, res) => {
           pageNumber: it.pageNumber,
           mergedCount: it.mergedCount,
         });
+        attachStandardPricing(processedItems[processedItems.length - 1]);
       }
 
       const newInvoice: Invoice = {
@@ -545,6 +572,7 @@ app.post('/api/catalog/map-item', (req, res) => {
       item.baseUnitPrice = priceCheck.baseUnitPrice;
       item.baseUnit = priceCheck.baseUnit;
       item.priceComparable = priceCheck.comparable;
+      attachStandardPricing(item);
       db.saveMasterProduct(targetProduct);
     }
 
@@ -708,6 +736,7 @@ app.post('/api/catalog/bulk-approve', (req, res) => {
       item.baseUnitPrice = priceCheck.baseUnitPrice;
       item.baseUnit = priceCheck.baseUnit;
       item.priceComparable = priceCheck.comparable;
+      attachStandardPricing(item);
 
       db.saveMasterProduct(targetProduct);
       modifiedInvoices.add(invoice.id);
@@ -1250,6 +1279,7 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
       item.baseUnitPrice = comparison.baseUnitPrice;
       item.baseUnit = comparison.baseUnit;
       item.priceComparable = comparison.comparable;
+      attachStandardPricing(item);
 
       db.saveMasterProduct(product);
     }
@@ -1451,6 +1481,7 @@ app.post('/api/catalog/rebuild-price-history', (req, res) => {
         item.baseUnitPrice = cmp.baseUnitPrice;
         item.baseUnit = cmp.baseUnit;
         item.priceComparable = cmp.comparable;
+        attachStandardPricing(item);
       }
       db.updateInvoice(invoice.id, invoice);
     }

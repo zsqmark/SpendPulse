@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { formatBaseUnit, formatBasePrice, describePackHierarchy } from '../lib/units.ts';
 import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
+import { standardPrice } from '../lib/standardPricing.ts';
 
 interface MasterCatalogViewProps {
   products: MasterProduct[];
@@ -61,6 +62,39 @@ interface MasterCatalogViewProps {
    * which is what lets the pack hierarchy convert old prices.
    */
   onRebuildPriceHistory?: () => Promise<any>;
+}
+
+/**
+ * The price this product is quoted at - $/L when its name states a capacity, $/kg when it
+ * states a weight, $/ea when it states neither. Taken from the most recent line that still
+ * carries it, because that is the number the owner compares suppliers on.
+ */
+function quotedPriceOf(
+  prod: MasterProduct,
+  invoices: Invoice[]
+): { price: number; unit: string; per: string } | null {
+  const dated = [...invoices].sort((a, b) =>
+    (b.invoiceDate || '').localeCompare(a.invoiceDate || '')
+  );
+
+  for (const invoice of dated) {
+    for (let i = (invoice.items || []).length - 1; i >= 0; i--) {
+      const item = invoice.items[i];
+      if (item.masterProductId !== prod.id) continue;
+      const std = standardPrice({
+        rawDescription: item.rawDescription,
+        masterProductName: item.masterProductName,
+        brand: item.brand,
+        packSize: item.packSize,
+        unit: item.unit,
+        unitPrice: item.unitPrice,
+        isMeat: isMeatLine(item),
+      });
+      if (std.price == null) continue;
+      return { price: std.price, unit: std.unit, per: std.sellingUnit };
+    }
+  }
+  return null;
 }
 
 /** Price per base unit of the most recent purchase, when the pack hierarchy is known. */
@@ -1118,6 +1152,26 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                       </span>
                       <span className="text-slate-400 text-[11px]"> /{prod.standardUnit}</span>
                     </div>
+
+                    {(() => {
+                      const quoted = quotedPriceOf(prod, invoices);
+                      if (!quoted) return null;
+                      return (
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase">Quoted At</span>
+                          <span className="text-base font-bold text-amber-300 tabular-nums">
+                            $
+                            {quoted.price >= 1
+                              ? quoted.price.toFixed(2)
+                              : quoted.price.toFixed(3)}
+                          </span>
+                          <span className="text-slate-400 text-[11px]"> /{quoted.unit}</span>
+                          <span className="text-slate-600 block text-[10px]">
+                            per {quoted.per === 'ea' ? 'piece' : quoted.per}
+                          </span>
+                        </div>
+                      );
+                    })()}
 
                     <div>
                       <span className="text-slate-500 block text-[10px] uppercase">Historic Range</span>

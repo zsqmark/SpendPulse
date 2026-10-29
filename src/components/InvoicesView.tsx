@@ -737,6 +737,17 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
 
                             <td className="py-2.5 px-3 font-mono text-right text-slate-200 tabular-nums">
                               ${item.unitPrice.toFixed(2)}
+                              {item.standardUnitPrice != null && item.standardUnit ? (
+                                <div
+                                  className="text-[10px] text-slate-500 tabular-nums"
+                                  title={`Quoted per ${item.standardUnit} - how the catalogue states this product`}
+                                >
+                                  ${item.standardUnitPrice >= 1
+                                    ? item.standardUnitPrice.toFixed(2)
+                                    : item.standardUnitPrice.toFixed(3)}
+                                  /{item.standardUnit}
+                                </div>
+                              ) : null}
                             </td>
 
                             <td className="py-2.5 px-3 font-mono text-right font-semibold text-slate-100 tabular-nums">

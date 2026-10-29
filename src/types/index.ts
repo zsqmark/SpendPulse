@@ -43,6 +43,16 @@ export interface InvoiceItem {
    * product's other invoices. The price is still recorded - it is just not judged.
    */
   priceComparable?: boolean | null;
+  /**
+   * The price re-quoted the way the catalogue always shows it: $/L when the name states a
+   * capacity, $/kg when it states a weight, $/ea when it states neither. Meat keeps the
+   * per-kilo price taken from the invoice's weight column.
+   */
+  standardUnitPrice?: number | null;
+  /** The unit behind standardUnitPrice - 'L' | 'kg' | 'ea'. */
+  standardUnit?: 'L' | 'kg' | 'ea' | null;
+  /** What the supplier counts the goods in - 按瓶 'bottle' | 按包 'bag' | 按个 'ea'. */
+  standardSellingUnit?: 'bottle' | 'bag' | 'ea' | null;
 }
 
 /** A stored copy of one page of the original source document. */
