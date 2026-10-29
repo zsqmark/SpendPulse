@@ -105,6 +105,139 @@ export interface Invoice {
    * document being imported twice before any OCR is spent.
    */
   contentHash?: string;
+  /**
+   * Set once a bill is settled / reconciled and must not be re-edited. A locked invoice is
+   * offered in the unit-of-measure editor but cannot be ticked - see `lockedReason`.
+   */
+  locked?: boolean;
+  /** Why the invoice is locked, shown verbatim to the user. e.g. "Settled 2026-10-30". */
+  lockedReason?: string | null;
+}
+
+/**
+ * How far a unit-of-measure change reaches. There is deliberately NO default: the user has
+ * to pick one, because silently rewriting every invoice of a product is not recoverable by
+ * eye and the pack maths behind every price alert depends on the unit label.
+ */
+export type UnitChangeScope = 'all' | 'selected';
+
+/** Why a particular invoice line cannot take a new unit. */
+export type UnitChangeBlockReason =
+  | 'invoice_locked'
+  | 'invoice_processing'
+  | 'invoice_error'
+  | 'meat_weight_priced';
+
+/** One invoice as offered by the unit-of-measure editor. */
+export interface ProductUnitInvoice {
+  invoiceId: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  vendorName: string;
+  status: InvoiceStatus;
+  locked: boolean;
+  /** Every distinct unit this product's lines carry on this invoice ("Carton", "Unit"). */
+  units: string[];
+  /** The same list joined for display: "Carton, Unit". */
+  unitSummary: string;
+  lineCount: number;
+  packSize: string | null;
+  unitPrice: number | null;
+  /** True when nothing on this invoice may be re-labelled. */
+  blocked: boolean;
+  /** Machine-readable reason, for icons and grouping. */
+  blockReason: UnitChangeBlockReason | null;
+  /** Sentence shown when the row is disabled. */
+  blockMessage: string | null;
+  /** True when an unresolved price alert already points at this invoice for this product. */
+  hasOpenAlert: boolean;
+  lines: ProductUnitLine[];
+}
+
+export interface ProductUnitLine {
+  itemId: string;
+  rawDescription: string;
+  unit: string;
+  packSize: string | null;
+  unitPrice: number;
+  quantity: number | null;
+  totalPrice: number;
+  /** Meat lines are priced from the invoice's own Weight column, so their unit is fixed. */
+  blocked: boolean;
+  blockReason: UnitChangeBlockReason | null;
+}
+
+export interface ProductUnitContext {
+  product: MasterProduct;
+  unitOptions: { value: string; label: string; level: string }[];
+  invoices: ProductUnitInvoice[];
+}
+
+/** What one executed change would do, before anything is written. */
+export interface UnitChangePreview {
+  productId: string;
+  productName: string;
+  newUnit: string;
+  newUnitLabel: string;
+  scope: UnitChangeScope;
+  invoiceCount: number;
+  lineCount: number;
+  /** The units currently in force across the affected lines. */
+  fromUnits: string[];
+  perInvoice: {
+    invoiceId: string;
+    invoiceNumber: string;
+    invoiceDate: string;
+    vendorName: string;
+    fromUnits: string[];
+    lineCount: number;
+    unitPrice: number | null;
+  }[];
+  skippedInvoices: {
+    invoiceId: string;
+    invoiceNumber: string;
+    reason: string;
+  }[];
+  /** Things worth knowing that do not stop the change. */
+  warnings: string[];
+}
+
+/** One line's before/after, kept so the change can be undone exactly. */
+export interface UnitChangeLineSnapshot {
+  invoiceId: string;
+  invoiceNumber: string;
+  itemId: string;
+  previousUnit: string;
+  newUnit: string;
+}
+
+/**
+ * A completed unit-of-measure change. Kept forever (even once reverted) so there is always
+ * an answer to "who relabelled this product, when, and which invoices did it touch".
+ */
+export interface UnitChangeRecord {
+  id: string;
+  productId: string;
+  productName: string;
+  /** 'change' for a user edit, 'revert' for undoing one. The log keeps both directions. */
+  kind: 'change' | 'revert';
+  /** For a revert: the id of the record it undid. */
+  revertsRecordId?: string | null;
+  scope: UnitChangeScope;
+  newUnit: string;
+  /** Mixed when the affected lines did not all carry one unit; otherwise that unit. */
+  fromUnit: string | null;
+  changedAt: string;
+  invoiceIds: string[];
+  invoiceNumbers: string[];
+  lineCount: number;
+  lines: UnitChangeLineSnapshot[];
+  /** Invoices that were selected but refused, with the reason. */
+  skipped: { invoiceId: string; invoiceNumber: string; reason: string }[];
+  /** Open price alerts touching these invoices at the time of the change - surfaced, never deleted. */
+  openAlertsAtChange: number;
+  revertedAt?: string | null;
+  revertedByRecordId?: string | null;
 }
 
 /** One invoice line as seen from the catalogue, with the measure it is priced by. */
@@ -129,6 +262,16 @@ export interface ProductLinesPayload {
   product: MasterProduct;
   productMeasure: string | null;
   lines: CatalogLine[];
+}
+
+/** Result of executing a unit-of-measure change. */
+export interface UnitChangeResult {
+  success: boolean;
+  record: UnitChangeRecord;
+  changedLines: number;
+  affectedInvoices: number;
+  /** Open alerts still pointing at the invoices that were relabelled. Surfaced, not deleted. */
+  openAlertsAffected: number;
 }
 
 export interface MasterProduct {

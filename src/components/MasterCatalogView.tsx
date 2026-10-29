@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MasterProduct, Invoice, ProductLinesPayload, SplitOutcome } from '../types/index.ts';
+import { UnitChangeModal, type UnitChangeApi } from './UnitChangeModal.tsx';
 import {
   PackageCheck,
   Search,
@@ -25,6 +26,7 @@ import {
   Combine,
   Boxes,
   Scissors,
+  Ruler,
 } from 'lucide-react';
 import { formatBaseUnit, formatBasePrice, describePackHierarchy } from '../lib/units.ts';
 import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
@@ -56,6 +58,8 @@ interface MasterCatalogViewProps {
     targetProductId?: string;
     newProduct?: { name?: string; unit?: string; packSize?: string; category?: string };
   }) => Promise<SplitOutcome>;
+  /** Server calls for the unit-of-measure editor. Omitted means the editor is unavailable. */
+  unitApi?: UnitChangeApi;
   onViewProductTrends: (productId: string) => void;
   /**
    * Replays every stored invoice to rebuild price history with the invoicing unit attached,
@@ -118,6 +122,7 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   onMergeProducts,
   onFetchProductLines,
   onSplitProduct,
+  unitApi,
   onViewProductTrends,
   onRebuildPriceHistory,
 }) => {
@@ -167,6 +172,8 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   const [highlightProductId, setHighlightProductId] = useState<string | null>(null);
   const highlightRef = useRef<HTMLDivElement | null>(null);
   const [splitFailed, setSplitFailed] = useState(false);
+  /** The product whose unit of measure is being relabelled. */
+  const [unitTarget, setUnitTarget] = useState<MasterProduct | null>(null);
 
   // Rebuilding price history replays the stored invoices, which do carry the invoicing unit.
   const [isRebuilding, setIsRebuilding] = useState(false);
@@ -430,6 +437,14 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
       setIsSplitting(false);
     }
   };
+
+  // The unit editor stays open across its own writes, so keep its product in step with the
+  // catalogue the server has just re-read.
+  useEffect(() => {
+    if (!unitTarget) return;
+    const fresh = products.find((p) => p.id === unitTarget.id);
+    if (fresh && fresh !== unitTarget) setUnitTarget(fresh);
+  }, [products, unitTarget]);
 
   // Bring the product a split just produced into view, then let the highlight fade.
   useEffect(() => {
@@ -1223,6 +1238,20 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                       </button>
                     )}
 
+                    {unitApi && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setUnitTarget(prod);
+                        }}
+                        title="Change how this product is counted on its invoice lines"
+                        className="px-3 py-1.5 text-xs font-semibold text-cyan-300 hover:text-cyan-200 bg-cyan-950/40 hover:bg-cyan-900/40 border border-cyan-800/40 rounded-lg transition-colors flex items-center gap-1.5"
+                      >
+                        <Ruler className="w-3.5 h-3.5" />
+                        <span>UoM</span>
+                      </button>
+                    )}
+
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1511,6 +1540,16 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* RELABEL HOW THIS PRODUCT IS COUNTED ON ITS INVOICE LINES */}
+      {unitApi && unitTarget ? (
+        <UnitChangeModal
+          product={unitTarget}
+          unitApi={unitApi}
+          onClose={() => setUnitTarget(null)}
+          onApplied={async () => undefined}
+        />
+      ) : null}
     </div>
   );
 };

@@ -26,9 +26,23 @@ import {
   getInvoicePageFile,
   deleteAllDocuments,
 } from './src/server/documentStore.ts';
-import { Invoice, InvoiceItem, PriceAlert, MasterProduct, VendorSummary } from './src/types/index.ts';
+import {
+  Invoice,
+  InvoiceItem,
+  PriceAlert,
+  MasterProduct,
+  VendorSummary,
+  UnitChangeRecord,
+  UnitChangeScope,
+  UnitChangeBlockReason,
+  ProductUnitInvoice,
+  ProductUnitLine,
+  UnitChangePreview,
+  UnitChangeLineSnapshot,
+} from './src/types/index.ts';
 import { standardPrice } from './src/lib/standardPricing.ts';
 import { isMeatDescription } from './src/lib/meatPricing.ts';
+import { UNIT_OPTIONS, type UnitOption } from './src/lib/units.ts';
 import { normalizeVendorName, vendorKey } from './src/lib/vendorNormalizer.ts';
 import { measureClassOf, measuresConflict, describeMeasure } from './src/server/unitConversion.ts';
 
@@ -1124,6 +1138,501 @@ app.post('/api/catalog/split', (req, res) => {
   } catch (err: any) {
     console.error('Split failed:', err);
     res.status(500).json({ error: err.message || 'Split failed' });
+  }
+});
+
+// =====================================================================================
+// UNIT OF MEASURE EDITOR
+//
+// OCR reads the unit column inconsistently - one invoice prints "Carton", the next "Unit"
+// for the very same product - and every price comparison downstream is divided by that
+// label. Letting the owner relabel a product line by line is therefore the one correction
+// that fixes a whole class of false alerts.
+//
+// Three things make it safe to offer: nothing happens until the user states the scope,
+// each line's previous unit is snapshotted so the change can be undone exactly, and every
+// change is written to an append-only log.
+// =====================================================================================
+
+/**
+ * Why a line cannot be relabelled - or null when it can be.
+ *
+ * There is no "settled" flag anywhere in the bills themselves, so the check uses what the
+ * system genuinely knows: an invoice that is still being ingested or that failed ingestion
+ * is not trustworthy to hand-edit, a locked invoice is one the business has closed off,
+ * and a meat line's unit belongs to the weight-pricing rule rather than to the user.
+ */
+function unitChangeBlockFor(
+  invoice: Invoice,
+  item: InvoiceItem
+): { reason: UnitChangeBlockReason; message: string } | null {
+  if (invoice.locked) {
+    return {
+      reason: 'invoice_locked',
+      message: invoice.lockedReason
+        ? `Locked - ${invoice.lockedReason}`
+        : 'Locked - this invoice has been closed off and can no longer be edited.',
+    };
+  }
+  if (invoice.status === 'processing') {
+    return {
+      reason: 'invoice_processing',
+      message: 'Still being processed - wait until extraction finishes so the label is not overwritten.',
+    };
+  }
+  if (invoice.status === 'error') {
+    return {
+      reason: 'invoice_error',
+      message: 'This invoice failed extraction, so its lines are incomplete. Re-import it first.',
+    };
+  }
+  if (isMeatDescription(item.rawDescription, item.brand)) {
+    return {
+      reason: 'meat_weight_priced',
+      message: 'Meat is priced from the invoice Weight column, and that rule sets the unit. Correct the weight instead.',
+    };
+  }
+  return null;
+}
+
+/** Every invoice carrying this product, with the units its lines currently use. */
+function collectProductUnitInvoices(product: MasterProduct): ProductUnitInvoice[] {
+  const openAlerts = new Set(
+    db
+      .getAlerts()
+      .filter((a) => a.status === 'active' && a.masterProductId === product.id)
+      .map((a) => a.invoiceId)
+  );
+
+  const rows: ProductUnitInvoice[] = [];
+
+  for (const invoice of db.getInvoices()) {
+    const owned = invoice.items.filter((it) => it.masterProductId === product.id);
+    if (owned.length === 0) continue;
+
+    const lines: ProductUnitLine[] = owned.map((item) => {
+      const block = unitChangeBlockFor(invoice, item);
+      return {
+        itemId: item.id,
+        rawDescription: item.rawDescription,
+        unit: item.unit,
+        packSize: item.packSize ?? null,
+        unitPrice: item.unitPrice,
+        quantity: item.quantity ?? null,
+        totalPrice: item.totalPrice,
+        blocked: Boolean(block),
+        blockReason: block?.reason ?? null,
+      };
+    });
+
+    const units = Array.from(new Set(lines.map((l) => l.unit).filter(Boolean)));
+    const firstBlockedLine = lines.find((l) => l.blocked);
+
+    rows.push({
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoiceNumber,
+      invoiceDate: invoice.invoiceDate,
+      vendorName: invoice.vendorName,
+      status: invoice.status,
+      locked: Boolean(invoice.locked),
+      units,
+      unitSummary: units.join(', ') || '(none)',
+      lineCount: lines.length,
+      packSize: owned.find((o) => o.packSize)?.packSize ?? null,
+      unitPrice: owned.find((o) => Number.isFinite(o.unitPrice))?.unitPrice ?? null,
+      blocked: Boolean(firstBlockedLine),
+      blockReason: firstBlockedLine?.blockReason ?? null,
+      blockMessage: firstBlockedLine
+        ? unitChangeBlockFor(invoice, owned.find((o) => o.id === firstBlockedLine.itemId)!)
+            ?.message ?? null
+        : null,
+      hasOpenAlert: openAlerts.has(invoice.id),
+      lines,
+    });
+  }
+
+  rows.sort((a, b) => (b.invoiceDate || '').localeCompare(a.invoiceDate || ''));
+  return rows;
+}
+
+function unitOptionFor(value: string): UnitOption | null {
+  return UNIT_OPTIONS.find((o) => o.value === value) ?? null;
+}
+
+/**
+ * Chooses which invoices a change reaches. Nothing is inferred - 'all' and 'selected' are
+ * both explicit user choices, and an empty selection is an error rather than a silent
+ * whole-catalogue rewrite.
+ */
+function resolveUnitChangeTargets(
+  rows: ProductUnitInvoice[],
+  scope: UnitChangeScope,
+  selectedInvoiceIds: string[]
+): { targets: ProductUnitInvoice[]; skipped: { invoiceId: string; invoiceNumber: string; reason: string }[] } {
+  const selected = new Set(selectedInvoiceIds);
+  const targets: ProductUnitInvoice[] = [];
+  const skipped: { invoiceId: string; invoiceNumber: string; reason: string }[] = [];
+
+  for (const row of rows) {
+    const wanted = scope === 'all' || selected.has(row.invoiceId);
+    if (!wanted) continue;
+    if (row.blocked) {
+      skipped.push({
+        invoiceId: row.invoiceId,
+        invoiceNumber: row.invoiceNumber,
+        reason: row.blockMessage ?? 'This invoice cannot be edited.',
+      });
+      continue;
+    }
+    targets.push(row);
+  }
+
+  return { targets, skipped };
+}
+
+function buildUnitChangePreview(
+  product: MasterProduct,
+  rows: ProductUnitInvoice[],
+  newUnit: string,
+  scope: UnitChangeScope,
+  selectedInvoiceIds: string[]
+): UnitChangePreview {
+  const option = unitOptionFor(newUnit);
+  const { targets, skipped } = resolveUnitChangeTargets(rows, scope, selectedInvoiceIds);
+
+  const fromUnits = Array.from(new Set(targets.flatMap((t) => t.units)));
+  const warnings: string[] = [];
+
+  const alreadyCount = targets.filter((t) => t.units.includes(newUnit)).length;
+  if (alreadyCount > 0) {
+    warnings.push(
+      `${alreadyCount} of the selected invoice(s) already use "${newUnit}" - those lines will simply keep their unit.`
+    );
+  }
+  const alertCount = targets.filter((t) => t.hasOpenAlert).length;
+  if (alertCount > 0) {
+    warnings.push(
+      `${alertCount} of the selected invoice(s) already carry an open price alert for this product. Relabelling changes how that line is judged, so review those alerts afterwards.`
+    );
+  }
+  if (targets.length > 0) {
+    warnings.push(
+      'The product’s price history is rebuilt from its lines, so its current / previous / min / max price may move. Nothing else about the product is touched.'
+    );
+  }
+
+  return {
+    productId: product.id,
+    productName: product.name,
+    newUnit,
+    newUnitLabel: option?.label ?? newUnit,
+    scope,
+    invoiceCount: targets.length,
+    lineCount: targets.reduce((n, t) => n + t.lineCount, 0),
+    fromUnits,
+    perInvoice: targets.map((t) => ({
+      invoiceId: t.invoiceId,
+      invoiceNumber: t.invoiceNumber,
+      invoiceDate: t.invoiceDate,
+      vendorName: t.vendorName,
+      fromUnits: t.units,
+      lineCount: t.lineCount,
+      unitPrice: t.unitPrice,
+    })),
+    skippedInvoices: skipped,
+    warnings,
+  };
+}
+
+/**
+ * Writes the new unit onto every line of the chosen invoices, relabels nothing else, then
+ * rebuilds the one product the lines belong to.
+ *
+ * Order matters: the lines take their new label first, then the product's history is
+ * replayed from them, then every touched invoice is re-judged - so what is shown is always
+ * derived from the same source rather than patched in place.
+ */
+function applyUnitChange(
+  product: MasterProduct,
+  targets: ProductUnitInvoice[],
+  newUnit: string
+): { lines: UnitChangeLineSnapshot[]; invoiceIds: string[]; invoiceNumbers: string[] } {
+  const snapshots: UnitChangeLineSnapshot[] = [];
+  const touchOrder: string[] = [];
+  const invoiceNumbers: string[] = [];
+
+  for (const row of targets) {
+    const invoice = db.getInvoice(row.invoiceId);
+    if (!invoice) continue;
+
+    for (const line of row.lines) {
+      const item = invoice.items.find((it) => it.id === line.itemId);
+      if (!item || item.masterProductId !== product.id) continue;
+      if (unitChangeBlockFor(invoice, item)) continue;
+
+      const previousUnit = item.unit;
+      if (previousUnit === newUnit) {
+        // Nothing to write, but still worth recording so the preview matches the outcome.
+        snapshots.push({
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          itemId: item.id,
+          previousUnit,
+          newUnit,
+        });
+        continue;
+      }
+
+      item.unit = newUnit;
+      snapshots.push({
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        itemId: item.id,
+        previousUnit,
+        newUnit,
+      });
+    }
+
+    db.updateInvoice(invoice.id, invoice);
+    if (!touchOrder.includes(invoice.id)) {
+      touchOrder.push(invoice.id);
+      invoiceNumbers.push(invoice.invoiceNumber);
+    }
+  }
+
+  refreshProductFromInvoices(product.id);
+  for (const invoiceId of touchOrder) refreshLineComparisons(invoiceId);
+
+  return { lines: snapshots, invoiceIds: touchOrder, invoiceNumbers };
+}
+
+/**
+ * Every line of one product, across every invoice it appears on.
+ *
+ * The unit column is the input OCR gets wrong most often, and it is the input every price
+ * comparison divides by - so this is also the list to look at when a product's history
+ * makes no sense.
+ */
+app.get('/api/catalog/:productId/unit-invoices', (req, res) => {
+  const product = db.getMasterProduct(req.params.productId);
+  if (!product) return res.status(404).json({ error: 'Product not found' });
+
+  res.json({
+    product,
+    unitOptions: UNIT_OPTIONS.map((o) => ({ value: o.value, label: o.label, level: o.level })),
+    invoices: collectProductUnitInvoices(product),
+  });
+});
+
+/** What a change would touch. Writes nothing, so it is safe to call on every keystroke. */
+app.post('/api/catalog/:productId/unit-change/preview', (req, res) => {
+  const product = db.getMasterProduct(req.params.productId);
+  if (!product) return res.status(404).json({ error: 'Product not found' });
+
+  const { newUnit, scope, invoiceIds } = req.body as {
+    newUnit?: string;
+    scope?: UnitChangeScope;
+    invoiceIds?: string[];
+  };
+
+  if (!newUnit || !unitOptionFor(newUnit)) {
+    return res
+      .status(400)
+      .json({ error: `"${newUnit ?? ''}" is not one of this system's units. Pick one from the list.` });
+  }
+  if (scope !== 'all' && scope !== 'selected') {
+    return res.status(400).json({ error: 'Choose whether this applies to all invoices or only selected ones.' });
+  }
+  if (scope === 'selected' && (!Array.isArray(invoiceIds) || invoiceIds.length === 0)) {
+    return res.status(400).json({ error: 'Tick at least one invoice, or switch the scope to all invoices.' });
+  }
+
+  const rows = collectProductUnitInvoices(product);
+  res.json(buildUnitChangePreview(product, rows, newUnit, scope, invoiceIds ?? []));
+});
+
+/** Applies the change and writes the record that makes it reversible. */
+app.post('/api/catalog/:productId/unit-change', (req, res) => {
+  try {
+    const product = db.getMasterProduct(req.params.productId);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const { newUnit, scope, invoiceIds } = req.body as {
+      newUnit?: string;
+      scope?: UnitChangeScope;
+      invoiceIds?: string[];
+    };
+
+    if (!newUnit || !unitOptionFor(newUnit)) {
+      return res.status(400).json({ error: `"${newUnit ?? ''}" is not one of this system's units.` });
+    }
+    if (scope !== 'all' && scope !== 'selected') {
+      return res.status(400).json({ error: 'Choose a scope before applying this change.' });
+    }
+
+    const rows = collectProductUnitInvoices(product);
+    const { targets, skipped } = resolveUnitChangeTargets(rows, scope, invoiceIds ?? []);
+    if (targets.length === 0) {
+      return res.status(400).json({
+        error:
+          skipped.length > 0
+            ? `Nothing to change - every invoice selected is locked or otherwise uneditable.`
+            : 'No invoices selected.',
+        skipped,
+      });
+    }
+
+    const openAlertsBefore = db
+      .getAlerts()
+      .filter((a) => a.status === 'active' && a.masterProductId === product.id).length;
+
+    const applied = applyUnitChange(product, targets, newUnit);
+
+    const record: UnitChangeRecord = {
+      id: `uc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      productId: product.id,
+      productName: product.name,
+      kind: 'change',
+      scope,
+      newUnit,
+      fromUnit: applied.lines.length
+        ? Array.from(new Set(applied.lines.map((l) => l.previousUnit))).join(', ')
+        : null,
+      changedAt: new Date().toISOString(),
+      invoiceIds: applied.invoiceIds,
+      invoiceNumbers: applied.invoiceNumbers,
+      lineCount: applied.lines.length,
+      lines: applied.lines,
+      skipped,
+      openAlertsAtChange: openAlertsBefore,
+      revertedAt: null,
+    };
+    db.addUnitChangeRecord(record);
+
+    const refreshed = db.getMasterProduct(product.id) ?? product;
+    res.json({
+      success: true,
+      record,
+      changedLines: applied.lines.length,
+      affectedInvoices: applied.invoiceIds.length,
+      openAlertsAffected: openAlertsBefore,
+      skipped,
+      product: {
+        id: refreshed.id,
+        standardUnit: refreshed.standardUnit,
+        currentPrice: refreshed.currentPrice,
+      },
+    });
+  } catch (err: any) {
+    console.error('Unit change failed:', err);
+    res.status(500).json({ error: err.message || 'Unit change failed' });
+  }
+});
+
+/** The audit trail for one product, newest first. */
+app.get('/api/catalog/:productId/unit-changes', (req, res) => {
+  res.json({ records: db.getUnitChangeRecordsFor(req.params.productId) });
+});
+
+/**
+ * Undoes a recorded change from the snapshot taken at the time.
+ *
+ * Each line is restored to the unit it carried before - not to today's product standard -
+ * so a revert is exact even when later edits have moved things around. Rows whose invoice
+ * has since disappeared are reported rather than silently dropped.
+ */
+app.post('/api/unit-changes/:recordId/revert', (req, res) => {
+  try {
+    const record = db.getUnitChangeLog().find((r) => r.id === req.params.recordId);
+    if (!record) return res.status(404).json({ error: 'Change record not found' });
+    if (record.revertedAt) {
+      return res.status(400).json({ error: `This change was already reverted on ${record.revertedAt.slice(0, 10)}.` });
+    }
+
+    const product = db.getMasterProduct(record.productId);
+    if (!product) return res.status(404).json({ error: 'The product of this change no longer exists' });
+
+    const restored: UnitChangeLineSnapshot[] = [];
+    const missing: { invoiceId: string; invoiceNumber: string; reason: string }[] = [];
+    const touched: string[] = [];
+    const touchedNumbers: string[] = [];
+
+    for (const snapshot of record.lines) {
+      const invoice = db.getInvoice(snapshot.invoiceId);
+      const item = invoice?.items.find((it) => it.id === snapshot.itemId);
+      if (!invoice || !item) {
+        missing.push({
+          invoiceId: snapshot.invoiceId,
+          invoiceNumber: snapshot.invoiceNumber,
+          reason: 'This invoice no longer exists, so its line cannot be restored.',
+        });
+        continue;
+      }
+      if (item.masterProductId !== product.id) {
+        missing.push({
+          invoiceId: snapshot.invoiceId,
+          invoiceNumber: snapshot.invoiceNumber,
+          reason: 'The line now belongs to a different product (it was split since).',
+        });
+        continue;
+      }
+
+      const currentUnit = item.unit;
+      item.unit = snapshot.previousUnit;
+      restored.push({
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        itemId: item.id,
+        previousUnit: currentUnit,
+        newUnit: snapshot.previousUnit,
+      });
+      db.updateInvoice(invoice.id, invoice);
+      if (!touched.includes(invoice.id)) {
+        touched.push(invoice.id);
+        touchedNumbers.push(invoice.invoiceNumber);
+      }
+    }
+
+    refreshProductFromInvoices(product.id);
+    for (const invoiceId of touched) refreshLineComparisons(invoiceId);
+
+    const revertedUnits = Array.from(new Set(restored.map((r) => r.newUnit)));
+    const revertRecord: UnitChangeRecord = {
+      id: `uc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      productId: product.id,
+      productName: product.name,
+      kind: 'revert',
+      revertsRecordId: record.id,
+      scope: 'selected',
+      newUnit: revertedUnits.length === 1 ? revertedUnits[0] : (revertedUnits.join(', ') || '(mixed)'),
+      fromUnit: Array.from(new Set(restored.map((r) => r.previousUnit))).join(', ') || null,
+      changedAt: new Date().toISOString(),
+      invoiceIds: touched,
+      invoiceNumbers: touchedNumbers,
+      lineCount: restored.length,
+      lines: restored,
+      skipped: missing,
+      openAlertsAtChange: db
+        .getAlerts()
+        .filter((a) => a.status === 'active' && a.masterProductId === product.id).length,
+      revertedAt: null,
+    };
+    db.addUnitChangeRecord(revertRecord);
+    db.updateUnitChangeRecord(record.id, {
+      revertedAt: revertRecord.changedAt,
+      revertedByRecordId: revertRecord.id,
+    });
+
+    res.json({
+      success: true,
+      record: revertRecord,
+      restoredLines: restored.length,
+      affectedInvoices: touched.length,
+      skipped: missing,
+    });
+  } catch (err: any) {
+    console.error('Unit change revert failed:', err);
+    res.status(500).json({ error: err.message || 'Revert failed' });
   }
 });
 

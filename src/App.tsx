@@ -20,7 +20,17 @@ import {
   LineItemUpdateResult,
   ProductLinesPayload,
   SplitOutcome,
+  UnitChangeRecord,
+  UnitChangePreview,
+  UnitChangeScope,
+  UnitChangeResult,
 } from './types/index.ts';
+import type {
+  UnitChangeApi,
+  UnitChangeContext,
+  ApplyUnitChangeOutcome,
+  RevertUnitChangeOutcome,
+} from './components/UnitChangeModal.tsx';
 import {
   FileText,
   TrendingUp,
@@ -227,6 +237,102 @@ export default function App() {
     } catch (err: any) {
       return { error: err?.message || 'Split failed' };
     }
+  };
+
+  /**
+   * The unit-of-measure editor. It is deliberately several calls instead of one: the
+   * preview must be re-derived from the server on every change of mind, so what the user
+   * confirms is exactly what will happen rather than a count computed earlier.
+   */
+  const unitApi: UnitChangeApi = {
+    fetchContext: async (productId) => {
+      try {
+        const res = await fetch(apiUrl(`/api/catalog/${productId}/unit-invoices`));
+        if (!res.ok) return null;
+        return (await res.json()) as UnitChangeContext;
+      } catch (err) {
+        console.error('Failed to load unit context:', err);
+        return null;
+      }
+    },
+    fetchHistory: async (productId) => {
+      try {
+        const res = await fetch(apiUrl(`/api/catalog/${productId}/unit-changes`));
+        if (!res.ok) return [];
+        const json = await res.json().catch(() => ({}));
+        return (json.records || []) as UnitChangeRecord[];
+      } catch (err) {
+        console.error('Failed to load unit change history:', err);
+        return [];
+      }
+    },
+    preview: async (payload) => {
+      try {
+        const res = await fetch(
+          apiUrl(`/api/catalog/${payload.productId}/unit-change/preview`),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              newUnit: payload.newUnit,
+              scope: payload.scope,
+              invoiceIds: payload.invoiceIds,
+            }),
+          }
+        );
+        if (!res.ok) return null;
+        return (await res.json()) as UnitChangePreview;
+      } catch (err) {
+        console.error('Failed to preview unit change:', err);
+        return null;
+      }
+    },
+    apply: async (payload) => {
+      try {
+        const res = await fetch(apiUrl(`/api/catalog/${payload.productId}/unit-change`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            newUnit: payload.newUnit,
+            scope: payload.scope,
+            invoiceIds: payload.invoiceIds,
+          }),
+        });
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          return { error: errJson.error || `Unit change failed (${res.status})` };
+        }
+        const json = (await res.json()) as UnitChangeResult;
+        await loadData();
+        return {
+          error: null,
+          changedLines: json.changedLines,
+          affectedInvoices: json.affectedInvoices,
+          skipped: json.record?.skipped?.map((s) => ({
+            invoiceNumber: s.invoiceNumber,
+            reason: s.reason,
+          })),
+        };
+      } catch (err: any) {
+        return { error: err?.message || 'Unit change failed' };
+      }
+    },
+    revert: async (recordId) => {
+      try {
+        const res = await fetch(apiUrl(`/api/unit-changes/${recordId}/revert`), {
+          method: 'POST',
+        });
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          return { error: errJson.error || `Revert failed (${res.status})` };
+        }
+        const json = await res.json().catch(() => ({}));
+        await loadData();
+        return { error: null, restoredLines: json.restoredLines };
+      } catch (err: any) {
+        return { error: err?.message || 'Revert failed' };
+      }
+    },
   };
 
   /**
@@ -470,6 +576,7 @@ export default function App() {
                 onMergeProducts={handleMergeProducts}
                 onFetchProductLines={handleFetchProductLines}
                 onSplitProduct={handleSplitProduct}
+                unitApi={unitApi}
                 onViewProductTrends={handleViewProductTrends}
                 onRebuildPriceHistory={handleRebuildPriceHistory}
               />

@@ -1,6 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import { Invoice, MasterProduct, PriceAlert, InvoiceItem, DashboardStats } from '../types/index.ts';
+import {
+  Invoice,
+  MasterProduct,
+  PriceAlert,
+  InvoiceItem,
+  DashboardStats,
+  UnitChangeRecord,
+} from '../types/index.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'database.json');
@@ -9,6 +16,8 @@ export interface DatabaseSchema {
   invoices: Invoice[];
   masterProducts: MasterProduct[];
   alerts: PriceAlert[];
+  /** Every unit-of-measure change ever applied, newest first. Never pruned - it is the audit trail. */
+  unitChangeLog: UnitChangeRecord[];
   inboxFiles: {
     fileName: string;
     filePath: string;
@@ -32,7 +41,10 @@ class StorageEngine {
       }
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
-        return JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        // Older database files simply have no unit-change log yet.
+        if (!Array.isArray(parsed.unitChangeLog)) parsed.unitChangeLog = [];
+        return parsed as DatabaseSchema;
       }
     } catch (err) {
       console.error('Error loading database, initializing empty database:', err);
@@ -43,6 +55,7 @@ class StorageEngine {
       masterProducts: [],
       alerts: [],
       inboxFiles: [],
+      unitChangeLog: [],
     };
 
     this.saveData(emptyData);
@@ -156,6 +169,32 @@ class StorageEngine {
     return alert;
   }
 
+  /** Every unit-of-measure change, newest first. The audit trail for this feature. */
+  public getUnitChangeLog(): UnitChangeRecord[] {
+    return this.data.unitChangeLog;
+  }
+
+  public getUnitChangeRecordsFor(productId: string): UnitChangeRecord[] {
+    return this.data.unitChangeLog.filter((r) => r.productId === productId);
+  }
+
+  public addUnitChangeRecord(record: UnitChangeRecord): UnitChangeRecord {
+    this.data.unitChangeLog.unshift(record);
+    this.saveData(this.data);
+    return record;
+  }
+
+  public updateUnitChangeRecord(
+    id: string,
+    updates: Partial<UnitChangeRecord>
+  ): UnitChangeRecord | undefined {
+    const record = this.data.unitChangeLog.find((r) => r.id === id);
+    if (!record) return undefined;
+    Object.assign(record, updates);
+    this.saveData(this.data);
+    return record;
+  }
+
   public getInboxFiles() {
     return this.data.inboxFiles;
   }
@@ -218,6 +257,7 @@ class StorageEngine {
       masterProducts: [],
       alerts: [],
       inboxFiles: [],
+      unitChangeLog: [],
     };
     this.saveData(this.data);
     return this.data;
