@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { MasterProduct, Invoice, ProductLinesPayload } from '../types/index.ts';
+import React, { useEffect, useRef, useState } from 'react';
+import { MasterProduct, Invoice, ProductLinesPayload, SplitOutcome } from '../types/index.ts';
 import {
   PackageCheck,
   Search,
@@ -55,7 +55,7 @@ interface MasterCatalogViewProps {
     lineRefs: { invoiceId: string; itemId: string }[];
     targetProductId?: string;
     newProduct?: { name?: string; unit?: string; packSize?: string; category?: string };
-  }) => Promise<string | null>;
+  }) => Promise<SplitOutcome>;
   onViewProductTrends: (productId: string) => void;
   /**
    * Replays every stored invoice to rebuild price history with the invoicing unit attached,
@@ -160,6 +160,12 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   const [isSplitLoading, setIsSplitLoading] = useState(false);
   const [isSplitting, setIsSplitting] = useState(false);
   const [splitResult, setSplitResult] = useState<string | null>(null);
+  /**
+   * The product a split just created. Without this the new card is one of two hundred and
+   * the user cannot tell whether the split did anything at all.
+   */
+  const [highlightProductId, setHighlightProductId] = useState<string | null>(null);
+  const highlightRef = useRef<HTMLDivElement | null>(null);
   const [splitFailed, setSplitFailed] = useState(false);
 
   // Rebuilding price history replays the stored invoices, which do carry the invoicing unit.
@@ -391,20 +397,31 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
     }
     setIsSplitting(true);
     try {
-      const error = await onSplitProduct({
+      const outcome: SplitOutcome = await onSplitProduct({
         productId: splitTarget.id,
         lineRefs: selected.map((l) => ({ invoiceId: l.invoiceId, itemId: l.itemId })),
         targetProductId: splitMode === 'existing' && splitExistingId ? splitExistingId : undefined,
         newProduct: splitMode === 'new' && splitName.trim() ? { name: splitName.trim() } : undefined,
       });
-      if (error) {
+      if (outcome.error) {
         setSplitFailed(true);
-        setSplitResult(error);
+        setSplitResult(outcome.error);
         return;
       }
       setSplitFailed(false);
+
+      // A brand new card is invisible the moment a search term or a category filter is
+      // still applied - it looks like the split did nothing. Clear both so the product
+      // the lines moved into is actually on screen.
+      setSearchTerm('');
+      setSelectedCategory('all');
+      setHighlightProductId(outcome.targetId ?? null);
+
+      const where = outcome.targetName
+        ? ` They are now "${outcome.targetName}".`
+        : '';
       setSplitResult(
-        `Split ${selected.length} line(s) out of "${splitTarget.name}".`
+        `Split ${outcome.moved ?? selected.length} line(s) out of "${splitTarget.name}".${where}`
       );
       setSplitTarget(null);
       setSplitLines([]);
@@ -413,6 +430,14 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
       setIsSplitting(false);
     }
   };
+
+  // Bring the product a split just produced into view, then let the highlight fade.
+  useEffect(() => {
+    if (!highlightProductId) return;
+    highlightRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const timer = setTimeout(() => setHighlightProductId(null), 6000);
+    return () => clearTimeout(timer);
+  }, [highlightProductId]);
 
   const sortedDropdownProducts = [...products].sort((a, b) => {
     if (dropdownSortBy === 'name_asc') return a.name.localeCompare(b.name);
@@ -1045,9 +1070,14 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
             sortedProducts.map((prod) => (
               <div
                 key={prod.id}
+                ref={prod.id === highlightProductId ? highlightRef : undefined}
                 onClick={() => toggleMergeSelection(prod.id)}
                 className={`p-4 hover:bg-slate-900/30 transition-colors cursor-pointer ${
                   mergeSelection.includes(prod.id) ? 'bg-blue-950/20' : ''
+                } ${
+                  prod.id === highlightProductId
+                    ? 'ring-2 ring-inset ring-emerald-500/70 bg-emerald-950/20'
+                    : ''
                 }`}
               >
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">

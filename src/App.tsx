@@ -19,6 +19,7 @@ import {
   LineItemPatch,
   LineItemUpdateResult,
   ProductLinesPayload,
+  SplitOutcome,
 } from './types/index.ts';
 import {
   FileText,
@@ -195,14 +196,16 @@ export default function App() {
 
   /**
    * Takes the given lines out of a product and gives them a product of their own (or moves
-   * them into one the user names). Returns the server's reason if the split was refused.
+   * them into one the user names). Resolves to the server's reason when the split was
+   * refused, otherwise to the product the lines now belong to - the catalogue needs that
+   * name, because a new card is easy to lose among two hundred.
    */
   const handleSplitProduct = async (payload: {
     productId: string;
     lineRefs: { invoiceId: string; itemId: string }[];
     targetProductId?: string;
     newProduct?: { name?: string; unit?: string; packSize?: string; category?: string };
-  }): Promise<string | null> => {
+  }): Promise<SplitOutcome> => {
     try {
       const res = await fetch(apiUrl('/api/catalog/split'), {
         method: 'POST',
@@ -210,13 +213,19 @@ export default function App() {
         body: JSON.stringify(payload),
       });
       if (res.ok) {
+        const json = await res.json().catch(() => ({}));
         await loadData();
-        return null;
+        return {
+          error: null,
+          targetId: json?.target?.id ?? null,
+          targetName: json?.target?.name ?? null,
+          moved: json?.movedLines ?? null,
+        };
       }
       const errJson = await res.json().catch(() => ({}));
-      return errJson.error || `Split failed (${res.status})`;
+      return { error: errJson.error || `Split failed (${res.status})` };
     } catch (err: any) {
-      return err?.message || 'Split failed';
+      return { error: err?.message || 'Split failed' };
     }
   };
 

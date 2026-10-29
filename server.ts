@@ -1026,7 +1026,11 @@ app.post('/api/catalog/split', (req, res) => {
         id: `mp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         sku: newProduct?.sku || seed?.supplierSku?.trim() || `SPLIT-${Date.now().toString().slice(-5)}`,
         name: (newProduct?.name || seedName || 'Split product').trim(),
-        category: newProduct?.category || guessCategory(newProduct?.name || seedName || ''),
+        // A piece split off a product is the same KIND of goods as its parent, so it keeps
+        // the parent's category. Guessing from the name instead is what filed "FISH CURRY
+        // POWDER" under Seafood: the new card then lands in a different category from the
+        // one it came out of and disappears the moment a category filter is applied.
+        category: newProduct?.category || source.category || guessCategory(newProduct?.name || seedName || ''),
         standardUnit: newProduct?.unit || seed?.unit || 'ea',
         standardPackSize: newProduct?.packSize ?? seed?.packSize ?? undefined,
         currentPrice: seed?.unitPrice ?? 0,

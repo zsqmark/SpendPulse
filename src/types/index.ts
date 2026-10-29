@@ -62,6 +62,17 @@ export interface InvoiceItem {
   standardSellingUnit?: 'bottle' | 'bag' | 'ea' | null;
 }
 
+/**
+ * What came of a split: the server's refusal, or the product the lines now belong to.
+ * The name matters - a new card is easy to lose among two hundred products.
+ */
+export interface SplitOutcome {
+  error: string | null;
+  targetId?: string | null;
+  targetName?: string | null;
+  moved?: number | null;
+}
+
 /** A stored copy of one page of the original source document. */
 export interface InvoiceDocumentPage {
   pageNumber: number;
