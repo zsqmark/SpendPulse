@@ -37,7 +37,7 @@ export const NOT_COMPARABLE_HINT: Record<NotComparableCode, string> = {
   implausible_gap:
     'Check the pack size and unit on this line and on the previous one - a gap this wide is almost always a misread, not a price move.',
   unit_differs:
-    'This invoice prices the product in a different unit from the last one. Add a pack size (e.g. 12*400ML) so the two can be converted into each other.',
+    'Add a pack size (e.g. 12*400ML) so the two can be converted into each other.',
   unknown:
     'The pack size or unit does not let this price be converted, so it is recorded without being judged.',
 };

@@ -262,9 +262,9 @@ export function compareAgainstHistory(
     // nothing on the product links the two. Not comparable.
     base.notComparableCode = 'unit_differs';
     base.notComparableReason =
-      `Priced per ${unitWord(unit)} on this invoice but per ${unitWord(
+      `Priced per ${unitWord(unit)} here but per ${unitWord(
         priorUnit
-      )} on the last one, at ${money(unitPrice)} against ${money(
+      )} on the last invoice - ${money(unitPrice)} against ${money(
         prior.unitPrice
       )}. ${NOT_COMPARABLE_HINT.unit_differs}`;
     return base;
