@@ -147,6 +147,8 @@ function refreshLineComparisons(invoiceId: string): void {
     item.baseUnitPrice = cmp.baseUnitPrice;
     item.baseUnit = cmp.baseUnit;
     item.priceComparable = cmp.comparable;
+    item.notComparableCode = cmp.notComparableCode ?? null;
+    item.notComparableReason = cmp.notComparableReason ?? null;
     attachStandardPricing(item);
   }
   db.updateInvoice(invoice.id, invoice);
@@ -405,6 +407,8 @@ app.post('/api/invoices/process', async (req, res) => {
           baseUnitPrice: priceCheck.baseUnitPrice,
           baseUnit: priceCheck.baseUnit,
           priceComparable: priceCheck.comparable,
+          notComparableCode: priceCheck.notComparableCode ?? null,
+          notComparableReason: priceCheck.notComparableReason ?? null,
           standardUnitPrice: null,
           standardUnit: null,
           standardSellingUnit: null,
@@ -572,6 +576,8 @@ app.post('/api/catalog/map-item', (req, res) => {
       item.baseUnitPrice = priceCheck.baseUnitPrice;
       item.baseUnit = priceCheck.baseUnit;
       item.priceComparable = priceCheck.comparable;
+      item.notComparableCode = priceCheck.notComparableCode ?? null;
+      item.notComparableReason = priceCheck.notComparableReason ?? null;
       attachStandardPricing(item);
       db.saveMasterProduct(targetProduct);
     }
@@ -736,6 +742,8 @@ app.post('/api/catalog/bulk-approve', (req, res) => {
       item.baseUnitPrice = priceCheck.baseUnitPrice;
       item.baseUnit = priceCheck.baseUnit;
       item.priceComparable = priceCheck.comparable;
+      item.notComparableCode = priceCheck.notComparableCode ?? null;
+      item.notComparableReason = priceCheck.notComparableReason ?? null;
       attachStandardPricing(item);
 
       db.saveMasterProduct(targetProduct);
@@ -1068,6 +1076,8 @@ app.post('/api/catalog/split', (req, res) => {
       item.baseUnitPrice = cmp.baseUnitPrice;
       item.baseUnit = cmp.baseUnit;
       item.priceComparable = cmp.comparable;
+      item.notComparableCode = cmp.notComparableCode ?? null;
+      item.notComparableReason = cmp.notComparableReason ?? null;
 
       db.updateInvoice(invoice.id, invoice);
     }
@@ -1279,6 +1289,8 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
       item.baseUnitPrice = comparison.baseUnitPrice;
       item.baseUnit = comparison.baseUnit;
       item.priceComparable = comparison.comparable;
+      item.notComparableCode = comparison.notComparableCode ?? null;
+      item.notComparableReason = comparison.notComparableReason ?? null;
       attachStandardPricing(item);
 
       db.saveMasterProduct(product);
@@ -1388,6 +1400,8 @@ app.post('/api/catalog/regroup', async (req, res) => {
           it.baseUnitPrice = check.baseUnitPrice;
           it.baseUnit = check.baseUnit;
           it.priceComparable = check.comparable;
+          it.notComparableCode = check.notComparableCode ?? null;
+          it.notComparableReason = check.notComparableReason ?? null;
           if (check.alertCreated) alertsCreated++;
         } else {
           unmapped++;
@@ -1481,6 +1495,8 @@ app.post('/api/catalog/rebuild-price-history', (req, res) => {
         item.baseUnitPrice = cmp.baseUnitPrice;
         item.baseUnit = cmp.baseUnit;
         item.priceComparable = cmp.comparable;
+        item.notComparableCode = cmp.notComparableCode ?? null;
+        item.notComparableReason = cmp.notComparableReason ?? null;
         attachStandardPricing(item);
       }
       db.updateInvoice(invoice.id, invoice);

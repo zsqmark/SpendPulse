@@ -44,6 +44,13 @@ export interface InvoiceItem {
    */
   priceComparable?: boolean | null;
   /**
+   * Why priceComparable is false: 'first_purchase' | 'no_price' | 'implausible_gap' |
+   * 'unit_differs'. Drives the short label the invoice view prints under "Not compared".
+   */
+  notComparableCode?: string | null;
+  /** The same thing in full, with the two figures that could not be compared. */
+  notComparableReason?: string | null;
+  /**
    * The price re-quoted the way the catalogue always shows it: $/L when the name states a
    * capacity, $/kg when it states a weight, $/ea when it states neither. Meat keeps the
    * per-kilo price taken from the invoice's weight column.

@@ -23,6 +23,7 @@ import {
   isPlausibleStep,
 } from './productUnits.ts';
 import { PriceAlert, MasterProduct } from '../types/index.ts';
+import { NOT_COMPARABLE_HINT, type NotComparableCode } from '../lib/comparisonReason.ts';
 
 export interface PriceCheckResult {
   hasPriceIncrease: boolean;
@@ -38,6 +39,10 @@ export interface PriceCheckResult {
    * compared. The UI must say so rather than implying the price held steady.
    */
   comparable: boolean;
+  /** Which rule blocked the comparison - drives the short label shown in the UI. */
+  notComparableCode?: NotComparableCode | null;
+  /** The full explanation, with the two figures that could not be compared. */
+  notComparableReason?: string | null;
   alertCreated?: PriceAlert;
 }
 
@@ -49,6 +54,8 @@ const NEUTRAL = {
   baseUnitPrice: null,
   baseUnit: null,
   comparable: false,
+  notComparableCode: null,
+  notComparableReason: null,
 };
 
 /**
@@ -77,8 +84,22 @@ export interface PriceComparison {
   baseUnitPrice: number | null;
   baseUnit: string | null;
   comparable: boolean;
+  /** Which rule blocked the comparison. Null once the two prices WERE compared. */
+  notComparableCode?: NotComparableCode | null;
+  /** The full explanation, with the two figures that could not be compared. */
+  notComparableReason?: string | null;
   /** True when the movement is a genuine increase worth raising. */
   isIncrease: boolean;
+}
+
+/** How a unit label is written inside a sentence. */
+function unitWord(unit?: string | null): string {
+  const u = (unit || '').trim();
+  return u || 'unit';
+}
+
+function money(value: number): string {
+  return `$${value.toFixed(2)}`;
 }
 
 /**
@@ -162,10 +183,20 @@ export function compareAgainstHistory(
     baseUnitPrice: incomingBase,
     baseUnit: reportedBase,
     comparable: false,
+    notComparableCode: 'first_purchase',
+    notComparableReason: NOT_COMPARABLE_HINT.first_purchase,
     isIncrease: false,
   };
 
-  if (!prior || !Number.isFinite(unitPrice) || unitPrice <= 0) return base;
+  if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+    base.notComparableCode = 'no_price';
+    base.notComparableReason = NOT_COMPARABLE_HINT.no_price;
+    return base;
+  }
+
+  // Nothing earlier to measure against. This is the ordinary case for a product's first
+  // invoice, not a fault - it becomes comparable from the next invoice onwards.
+  if (!prior) return base;
 
   let previousShown: number | null = null;
   let increase = false;
@@ -186,14 +217,24 @@ export function compareAgainstHistory(
       ? +(((unitPrice - prior.unitPrice) / prior.unitPrice) * 100).toFixed(2)
       : 0;
     base.isIncrease = false;
+    base.notComparableCode = null;
+    base.notComparableReason = null;
     return base;
   }
+
+  const gapTooWide = `Last invoice priced this at ${money(prior.unitPrice)} per ${unitWord(
+    priorUnit
+  )}; this one reads ${money(unitPrice)} per ${unitWord(unit)}. That gap is far too wide to be a real price move, so the line is recorded without being judged - most often the pack size or the unit was read differently.`;
 
   if (incomingBase != null && prevBase != null) {
     // The pack conversion is only trustworthy while the two recordings are in the same
     // ballpark. A carton price mislabelled "each" converts into a 3000% increase, which is
     // a unit problem, not a price move - so such a pair is not compared at all.
-    if (!isPlausibleStep(prevBase, incomingBase)) return base;
+    if (!isPlausibleStep(prevBase, incomingBase)) {
+      base.notComparableCode = 'implausible_gap';
+      base.notComparableReason = gapTooWide;
+      return base;
+    }
 
     // Both convertible - compare per base unit, then show the old price in the new unit
     // so the two numbers on screen can be compared by eye.
@@ -208,14 +249,32 @@ export function compareAgainstHistory(
     }
   } else if (unitMeasureClass(unit) === unitMeasureClass(priorUnit)) {
     // No hierarchy known, but the prices are quoted on the same basis.
-    if (!isPlausibleStep(prior.unitPrice, unitPrice)) return base;
+    if (!isPlausibleStep(prior.unitPrice, unitPrice)) {
+      base.notComparableCode = 'implausible_gap';
+      base.notComparableReason = gapTooWide;
+      return base;
+    }
     base.comparable = true;
     previousShown = prior.unitPrice;
     increase = isRealIncrease(prior.unitPrice, unitPrice);
+  } else {
+    // The two numbers measure different things - a carton against a kilo, say - and
+    // nothing on the product links the two. Not comparable.
+    base.notComparableCode = 'unit_differs';
+    base.notComparableReason =
+      `Priced per ${unitWord(unit)} on this invoice but per ${unitWord(
+        priorUnit
+      )} on the last one, at ${money(unitPrice)} against ${money(
+        prior.unitPrice
+      )}. ${NOT_COMPARABLE_HINT.unit_differs}`;
+    return base;
   }
-  // Otherwise the two numbers measure different things - not comparable.
 
   if (!base.comparable || previousShown == null) return base;
+
+  // It WAS compared, so nothing is wrong with the line - clear the reason.
+  base.notComparableCode = null;
+  base.notComparableReason = null;
 
   base.previousPrice = previousShown;
   base.deltaAmount = +(unitPrice - previousShown).toFixed(2);
@@ -444,6 +503,8 @@ export function checkAndRecordPriceChange(params: {
     baseUnitPrice: comparison.baseUnitPrice,
     baseUnit: comparison.baseUnit,
     comparable: comparison.comparable,
+    notComparableCode: comparison.notComparableCode,
+    notComparableReason: comparison.notComparableReason,
   };
 
   // One move, one alert. The same product re-crossing the same two prices later is the

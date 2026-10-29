@@ -31,6 +31,7 @@ import {
   previewBaseUnit,
 } from '../lib/units.ts';
 import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
+import { describeNotComparable } from '../lib/comparisonReason.ts';
 import type { LineItemPatch, LineItemUpdateResult } from '../types/index.ts';
 
 interface InvoicesViewProps {
@@ -45,6 +46,28 @@ interface InvoicesViewProps {
     patch: LineItemPatch
   ) => Promise<LineItemUpdateResult | null>;
 }
+
+/**
+ * "Not compared" on its own is not an answer - the reader still does not know whether
+ * the line is fine (first purchase) or broken (the unit was misread). So the cell names
+ * the rule that blocked the comparison, and the full sentence - with the two figures
+ * that could not be reconciled - sits in the tooltip.
+ */
+const NotComparedCell: React.FC<{ code?: string | null; detail?: string | null }> = ({
+  code,
+  detail,
+}) => {
+  const { label, detail: full } = describeNotComparable(code, detail);
+  return (
+    <span className="inline-flex flex-col items-end" title={full}>
+      <span className="text-slate-400 inline-flex items-center gap-1">
+        <Info className="w-3 h-3 text-slate-600" />
+        Not compared
+      </span>
+      <span className="text-[10px] text-slate-600 leading-tight">{label}</span>
+    </span>
+  );
+};
 
 export const InvoicesView: React.FC<InvoicesViewProps> = ({
   invoices,
@@ -761,12 +784,10 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                                   +${item.priceDelta.toFixed(2)} ({item.priceDeltaPercent?.toFixed(1)}%)
                                 </span>
                               ) : item.priceComparable === false ? (
-                                <span
-                                  title="The pack size or unit does not let this price be converted, so it is recorded without being judged."
-                                  className="text-slate-500"
-                                >
-                                  Not compared
-                                </span>
+                                <NotComparedCell
+                                  code={item.notComparableCode}
+                                  detail={item.notComparableReason}
+                                />
                               ) : item.previousPrice != null ? (
                                 <span className="text-slate-500">No increase</span>
                               ) : (
