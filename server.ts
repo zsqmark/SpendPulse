@@ -773,12 +773,13 @@ app.post('/api/invoices/process', async (req, res) => {
 
         if (alignment.conflicts.length > 0) hasAlignmentConflicts = true;
 
-        // Only what actually moved is worth an audit line; a row that simply agreed with
-        // history would bury the few that did not.
+        // A row that simply agreed with history is recorded on the line itself; only what
+        // moved - or what was seen for the very first time - earns an audit entry, so the
+        // log stays about decisions rather than about every row of every statement.
         const changes = alignment.fields.filter(
           (f) => f.source === 'history' || f.source === 'converted' || f.conflict
         );
-        if (changes.length > 0) {
+        if (changes.length > 0 || alignment.isFirstEntry) {
           alignmentEntries.push({
             id: `al-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             invoiceId,
