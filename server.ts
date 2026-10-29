@@ -25,6 +25,7 @@ import {
   listInvoicePages,
   getInvoicePageFile,
   deleteAllDocuments,
+  deleteInvoiceDocuments,
 } from './src/server/documentStore.ts';
 import {
   Invoice,
@@ -224,6 +225,67 @@ app.get('/api/invoices/:id', async (req, res) => {
   const inv = db.getInvoice(req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
   res.json({ ...inv, documentPages: await listInvoicePages(inv.id) });
+});
+
+/**
+ * Takes one import back out, the way a bad upload has to be undone before it is re-scanned.
+ *
+ * A mis-segmented document leaves three kinds of debris behind: its own record, the price
+ * alerts raised from its lines, and master products that were auto-created from lines that
+ * now no longer exist. All three are cleaned up here, and every product it fed has its price
+ * history replayed from the invoices that remain - never patched by hand.
+ *
+ * `?keepOrphans=1` leaves childless master products in place; by default they are dropped,
+ * because a product with no lines cannot carry a price and only clutters the catalogue.
+ */
+app.delete('/api/invoices/:id', async (req, res) => {
+  try {
+    const inv = db.getInvoice(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+
+    const affectedProductIds = Array.from(
+      new Set((inv.items || []).map((it) => it.masterProductId).filter((id): id is string => Boolean(id)))
+    );
+
+    const alertsBefore = db.getAlerts().length;
+    db.pruneAlerts((a) => a.invoiceId !== inv.id);
+    const alertsRemoved = alertsBefore - db.getAlerts().length;
+
+    await deleteInvoiceDocuments(inv.id);
+
+    if (!db.deleteInvoice(inv.id)) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    for (const productId of affectedProductIds) refreshProductFromInvoices(productId);
+
+    const orphanIds: string[] = [];
+    if (req.query.keepOrphans !== '1') {
+      for (const product of db.getMasterProducts()) {
+        const stillUsed = db
+          .getInvoices()
+          .some((i) => (i.items || []).some((it) => it.masterProductId === product.id));
+        if (!stillUsed) orphanIds.push(product.id);
+      }
+      for (const id of orphanIds) db.deleteMasterProduct(id);
+    }
+
+    res.json({
+      success: true,
+      deleted: {
+        id: inv.id,
+        invoiceNumber: inv.invoiceNumber,
+        vendorName: inv.vendorName,
+        lineCount: (inv.items || []).length,
+      },
+      alertsRemoved,
+      productsRebuilt: affectedProductIds.length,
+      orphanProductsRemoved: orphanIds.length,
+    });
+  } catch (err: any) {
+    console.error('Invoice delete failed:', err);
+    res.status(500).json({ error: err.message || 'Invoice delete failed' });
+  }
 });
 
 // Original source pages, so extracted values can be checked against the scan.

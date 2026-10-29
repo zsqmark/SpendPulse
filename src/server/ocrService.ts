@@ -814,32 +814,42 @@ Rules:
  * downstream behaviour is unchanged. On any failure it falls back to a single group so the
  * pipeline never breaks.
  */
-export async function segmentPagesIntoInvoices(
-  pages: DocumentPage[]
-): Promise<DocumentPage[][]> {
-  if (!pages || pages.length <= 1) {
-    return [pages || []];
-  }
+/**
+ * How many page images are sent to the vision model in ONE segmentation call.
+ *
+ * This matters more than it looks. Line extraction is already chunked (MAX_PAGES_PER_REQUEST),
+ * but segmentation used to send every page of a document at once - a 30-page statement pack
+ * put 30 full-size images in a single request, the model answered with empty content, and the
+ * whole document silently collapsed into ONE invoice carrying hundreds of mixed-up lines.
+ * Windows of this size keep each request comfortably within what the model will answer.
+ */
+const SEGMENT_PAGES_PER_REQUEST = Number(process.env.OCR_SEGMENT_PAGES_PER_REQUEST || 6);
 
-  // Only segment when every page is an image we can show the model. A raw-PDF / mixed input
-  // is left as one invoice rather than guessing boundaries from non-image data.
-  if (!pages.every((p) => p.mimeType !== 'application/pdf')) {
-    return [pages];
-  }
-
+/**
+ * Asks the model to group ONE window of pages into invoices.
+ *
+ * Page numbers are labelled with their number in the WHOLE document, not their position in
+ * the window, so the answers of separate windows can be stitched back together. Returns
+ * arrays of 1-based global page numbers, or null when the call failed or was unusable.
+ */
+async function segmentWindowIntoGroups(
+  window: DocumentPage[],
+  offset: number,
+  totalPages: number
+): Promise<number[][] | null> {
   const parts: LlmMessage['parts'] = [
     {
       type: 'text',
-      text: `These ${pages.length} page images may contain ONE or SEVERAL separate invoices, statements, or delivery dockets, possibly from different vendors.
+      text: `These ${window.length} page images are an extract from a ${totalPages}-page document. They may contain ONE or SEVERAL separate invoices, statements, or delivery dockets, possibly from different vendors.
 
 Group the pages by which invoice they belong to. Invoices are usually separated by a new vendor / supplier header, a new invoice number, or a page that begins with a tax / summary / "amount due" totals block.
 
-Pages are labelled PAGE 1, PAGE 2, ... in order. Return JSON with a "groups" array: one object per invoice, each with "pageNumbers" - a sorted array of the 1-based page numbers in that invoice. Every page must appear in EXACTLY one group, with no gaps and no overlaps. If it is a single multi-page invoice, return one group containing all pages.`,
+Each page is labelled with its number in the ORIGINAL document. Return JSON with a "groups" array: one object per invoice, each with "pageNumbers" - a sorted array of those original page numbers. Every page shown must appear in EXACTLY one group, with no gaps and no overlaps. If it is a single multi-page invoice, return one group containing all the pages shown.`,
     },
   ];
 
-  pages.forEach((p, idx) => {
-    parts.push({ type: 'text', text: `\n----- PAGE ${idx + 1} OF ${pages.length} -----` });
+  window.forEach((p, idx) => {
+    parts.push({ type: 'text', text: `\n----- PAGE ${offset + idx + 1} OF ${totalPages} -----` });
     parts.push({ type: 'image', base64: p.base64Data, mimeType: p.mimeType });
   });
 
@@ -868,34 +878,107 @@ Pages are labelled PAGE 1, PAGE 2, ... in order. Return JSON with a "groups" arr
       json: { schema, name: 'invoice_segmentation' },
     });
     const parsed = parseJsonLoose<any>(raw);
-    if (Array.isArray(parsed?.groups) && parsed.groups.length > 0) {
-      const byPage = new Map<number, DocumentPage>();
-      pages.forEach((p, idx) => byPage.set(idx + 1, p));
-      const selected: DocumentPage[][] = [];
-      const used = new Set<number>();
-      let overlap = false;
-      for (const g of parsed.groups) {
-        const nums: number[] = Array.isArray(g?.pageNumbers) ? g.pageNumbers : [];
-        const sel: DocumentPage[] = [];
-        for (const n of nums) {
-          if (byPage.has(n)) {
-            if (used.has(n)) overlap = true;
-            used.add(n);
-            sel.push(byPage.get(n)!);
-          }
-        }
-        if (sel.length > 0) selected.push(sel);
-      }
-      // Safety: if the model dropped, duplicated, or overlapped any page, trust the split
-      // only when it accounts for every page exactly once.
-      if (!overlap && selected.length >= 1 && used.size === pages.length) {
-        return selected;
-      }
+    if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) return null;
+
+    const inWindow = new Set<number>();
+    window.forEach((_, idx) => inWindow.add(offset + idx + 1));
+
+    const groups: number[][] = [];
+    for (const g of parsed.groups) {
+      const nums: number[] = (Array.isArray(g?.pageNumbers) ? g.pageNumbers : [])
+        .filter((n: unknown) => typeof n === 'number' && inWindow.has(n))
+        .sort((a: number, b: number) => a - b);
+      if (nums.length > 0) groups.push(nums);
     }
+    return groups.length > 0 ? groups : null;
   } catch (err: any) {
-    console.warn('[OCR] Segmentation failed, treating document as one invoice:', err?.message);
+    console.warn('[OCR] Segmentation window failed:', err?.message);
+    return null;
   }
-  return [pages];
+}
+
+export async function segmentPagesIntoInvoices(
+  pages: DocumentPage[]
+): Promise<DocumentPage[][]> {
+  if (!pages || pages.length <= 1) {
+    return [pages || []];
+  }
+
+  // Only segment when every page is an image we can show the model. A raw-PDF / mixed input
+  // is left as one invoice rather than guessing boundaries from non-image data.
+  if (!pages.every((p) => p.mimeType !== 'application/pdf')) {
+    return [pages];
+  }
+
+  const total = pages.length;
+  const windowSize = Math.max(2, SEGMENT_PAGES_PER_REQUEST);
+  const windows: { start: number; pages: DocumentPage[] }[] = [];
+
+  // Consecutive windows share one page. That shared page is how the boundaries between two
+  // windows are joined: if both windows put it in a group, those groups are the same invoice.
+  for (let start = 0; start < total; ) {
+    const end = Math.min(start + windowSize, total);
+    windows.push({ start, pages: pages.slice(start, end) });
+    if (end >= total) break;
+    start = end - 1;
+  }
+
+  if (windows.length > 1) {
+    console.log(
+      `[OCR] ${total} pages exceed ${windowSize}/segmentation-request - splitting into ${windows.length} overlapping windows.`
+    );
+  }
+
+  // page number -> which group (index) it was filed under, so a group can be extended later.
+  const groups: number[][] = [];
+  const used = new Set<number>();
+
+  for (const win of windows) {
+    const winGroups = await segmentWindowIntoGroups(win.pages, win.start, total);
+    if (!winGroups) {
+      // One unusable window means the boundaries cannot be trusted - collapse to a single
+      // invoice rather than invent a split across a gap.
+      console.warn('[OCR] Segmentation incomplete, treating document as one invoice.');
+      return [pages];
+    }
+
+    const sharedPage = win.start + 1; // the page this window repeats from the previous one
+    const isContinuation = win.start > 0;
+
+    for (const nums of winGroups) {
+      const fresh = nums.filter((n) => !used.has(n));
+      if (fresh.length === 0) continue; // entirely the shared page - already filed
+
+      const continues = isContinuation && nums.includes(sharedPage) && groups.length > 0;
+      if (continues) {
+        groups[groups.length - 1].push(...fresh);
+      } else {
+        groups.push(fresh);
+      }
+      for (const n of fresh) used.add(n);
+    }
+  }
+
+  // Safety: trust the split only when every page landed in exactly one group. Anything less
+  // (a page the model dropped, or a boundary it never confirmed) is worse than one invoice.
+  if (groups.length === 0 || used.size !== total) {
+    console.warn(
+      `[OCR] Segmentation covered ${used.size}/${total} pages, treating document as one invoice.`
+    );
+    return [pages];
+  }
+
+  const byPage = new Map<number, DocumentPage>();
+  pages.forEach((p, idx) => byPage.set(idx + 1, p));
+
+  const selected = groups
+    .map((nums) => nums.map((n) => byPage.get(n)).filter((p): p is DocumentPage => Boolean(p)))
+    .filter((g) => g.length > 0);
+
+  if (selected.length <= 1) return [pages];
+
+  console.log(`[OCR] Segmented ${total} page(s) into ${selected.length} invoice(s).`);
+  return selected;
 }
 
 /**

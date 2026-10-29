@@ -95,6 +95,15 @@ class StorageEngine {
     return this.data.invoices[idx];
   }
 
+  /** Removes one invoice outright. Callers must rebuild any product it fed. */
+  public deleteInvoice(id: string): boolean {
+    const before = this.data.invoices.length;
+    this.data.invoices = this.data.invoices.filter((inv) => inv.id !== id);
+    if (this.data.invoices.length === before) return false;
+    this.saveData(this.data);
+    return true;
+  }
+
   public getMasterProducts(): MasterProduct[] {
     return this.data.masterProducts;
   }
