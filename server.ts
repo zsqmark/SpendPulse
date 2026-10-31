@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { db } from './src/server/storage.ts';
 import { mergeDuplicateLineItems, extractInvoicesFromDocument } from './src/server/ocrService.ts';
 import { batchMatchItems, guessCategory } from './src/server/aliasMatcher.ts';
+import { CATEGORY_OPTIONS, isKnownCategory, normaliseCategory } from './src/lib/categories.ts';
 import {
   alignLine,
   identityFor,
@@ -197,7 +198,10 @@ function refreshLineComparisons(invoiceId: string): void {
       item.unitPrice,
       item.unit,
       invoice.invoiceNumber,
-      invoice.invoiceDate
+      invoice.invoiceDate,
+      // The line's own pack is what lets a price be converted when the product's table
+      // lacks the unit; leaving it out here made a split product uncomparable.
+      item.packSize
     );
     item.previousPrice = cmp.previousPrice;
     item.priceDelta = cmp.deltaAmount;
@@ -970,7 +974,9 @@ app.post('/api/catalog/map-item', (req, res) => {
         id: newId,
         sku: newProductData.sku || item.supplierSku || `SKU-${Date.now().toString().slice(-4)}`,
         name: newProductData.name || item.rawDescription,
-        category: newProductData.category || 'General Supplies',
+        category: normaliseCategory(newProductData.category || guessCategory(newProductData.name || item.rawDescription)),
+        // Set by the owner in the add-product form, so no sweep may re-guess it.
+        categorySource: newProductData.category ? 'manual' : 'guessed',
         standardUnit: newProductData.standardUnit || item.unit,
         standardPackSize: newProductData.standardPackSize || item.packSize || undefined,
         currentPrice: item.unitPrice,
@@ -1495,7 +1501,15 @@ app.post('/api/catalog/split', (req, res) => {
         // the parent's category. Guessing from the name instead is what filed "FISH CURRY
         // POWDER" under Seafood: the new card then lands in a different category from the
         // one it came out of and disappears the moment a category filter is applied.
-        category: newProduct?.category || source.category || guessCategory(newProduct?.name || seedName || ''),
+        category: normaliseCategory(
+          newProduct?.category || source.category || guessCategory(newProduct?.name || seedName || '')
+        ),
+        // A split inherits its parent's provenance: an owner-set category stays owner-set.
+        categorySource: newProduct?.category
+          ? 'manual'
+          : source.categorySource === 'manual'
+          ? 'manual'
+          : 'guessed',
         standardUnit: newProduct?.unit || seed?.unit || 'ea',
         standardPackSize: newProduct?.packSize ?? seed?.packSize ?? undefined,
         currentPrice: seed?.unitPrice ?? 0,
@@ -2165,16 +2179,19 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
       item.totalPrice = +(item.quantity * item.unitPrice).toFixed(2);
     }
 
+    // The catalogue entry is read first, because a category the owner set by hand decides
+    // whether the weight rule applies at all.
+    let product = item.masterProductId ? db.getMasterProduct(item.masterProductId) : null;
+
     // Meat is priced by weight: re-derive the per-kg price from the corrected total /
     // weight so an edited line is judged in kilograms. A unit price the user typed in
     // themselves is respected and left alone.
     if (!unitPriceChanged) {
-      const derived = applyWeightPricing(item);
+      const derived = applyWeightPricing(item, product);
       if (derived.unitPrice != null) item.unitPrice = derived.unitPrice;
       if (derived.unit) item.unit = derived.unit;
     }
 
-    let product = item.masterProductId ? db.getMasterProduct(item.masterProductId) : null;
     let comparison: ReturnType<typeof compareAgainstHistory> | null = null;
     let alertRemoved = 0;
     let alertCreated = null as PriceAlert | null;
@@ -2538,6 +2555,153 @@ app.post('/api/catalog/rebuild-price-history', (req, res) => {
   } catch (err: any) {
     console.error('Price history rebuild failed:', err);
     res.status(500).json({ error: err.message || 'Price history rebuild failed' });
+  }
+});
+
+/**
+ * Files a product under a category and makes every place that quotes it agree.
+ *
+ * A category is not decoration: it decides whether the weight-pricing rule applies and it
+ * is what the line, the card and the filter all show. So a change has to reach the three
+ * places the value is copied to - the product, its invoice lines, and the alignment
+ * history that would otherwise hand the old value to the next invoice.
+ */
+function setProductCategory(
+  productId: string,
+  category: string,
+  source: 'guessed' | 'manual'
+): { name: string; itemsRelabelled: number; attributesUpdated: number; historyEntries: number } {
+  const product = db.getMasterProduct(productId);
+  if (!product) return { name: '', itemsRelabelled: 0, attributesUpdated: 0, historyEntries: 0 };
+
+  product.category = category;
+  product.categorySource = source;
+  db.saveMasterProduct(product);
+
+  // 1. Every invoice line carries its own copy of the category.
+  let itemsRelabelled = 0;
+  let linesSeen = 0;
+  for (const invoice of db.getInvoices()) {
+    let touched = false;
+    for (const item of invoice.items) {
+      if (item.masterProductId !== productId) continue;
+      linesSeen++;
+      if (item.category === category) continue;
+      item.category = category;
+      touched = true;
+      itemsRelabelled++;
+    }
+    if (touched) db.updateInvoice(invoice.id, { items: invoice.items });
+  }
+
+  // 2. The history library votes by majority, so leaving the old value in its samples would
+  //    put the product straight back where it was on the next upload.
+  let attributesUpdated = 0;
+  for (const record of db.getProductAttributes()) {
+    if (record.productId !== productId) continue;
+    let touched = false;
+    for (const sample of record.samples || []) {
+      if (sample.values?.category === category) continue;
+      sample.values = { ...(sample.values || {}), category };
+      touched = true;
+    }
+    if (touched) {
+      db.saveProductAttribute(record);
+      attributesUpdated++;
+    }
+  }
+
+  // 3. Price history is re-derived, because the category decides whether this product is
+  //    priced per kilogram. Only when the product still has lines: the rebuild clears the
+  //    history of a product with none, which would make a category change look like a
+  //    reason to forget its prices.
+  if (linesSeen > 0) refreshProductFromInvoices(productId);
+
+  return {
+    name: product.name,
+    itemsRelabelled,
+    attributesUpdated,
+    historyEntries: db.getMasterProduct(productId)?.priceHistory?.length || 0,
+  };
+}
+
+/**
+ * Moves one product to a category the owner picked.
+ *
+ * The keyword guess is a convenience, not an authority: "LEMON GRASS MINCE" is minced
+ * lemongrass and "MEAT CURRY POWDER" is a spice mix, and no word list gets every one of
+ * those right. A manual choice is therefore stored as manual and never re-guessed.
+ */
+app.post('/api/catalog/:productId/category', (req, res) => {
+  try {
+    const { category } = (req.body || {}) as { category?: string };
+    const wanted = normaliseCategory(category);
+    if (!isKnownCategory(wanted)) {
+      return res.status(400).json({
+        error: `Unknown category "${category ?? ''}". Use one of: ${CATEGORY_OPTIONS.join(', ')}`,
+        categories: CATEGORY_OPTIONS,
+      });
+    }
+
+    const product = db.getMasterProduct(req.params.productId);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const from = product.category;
+    if (from === wanted && product.categorySource === 'manual') {
+      return res.json({ success: true, unchanged: true, from, to: wanted, itemsRelabelled: 0 });
+    }
+
+    const result = setProductCategory(product.id, wanted, 'manual');
+    res.json({ success: true, unchanged: from === wanted, from, to: wanted, ...result });
+  } catch (err: any) {
+    console.error('Category change failed:', err);
+    res.status(500).json({ error: err.message || 'Category change failed' });
+  }
+});
+
+/**
+ * Re-runs the classification rules over the catalogue.
+ *
+ * Dry run by default: it lists what it would change and touches nothing. The owner has to
+ * look at that list first - a keyword rule that changes its mind about 70 products at once
+ * is exactly the kind of thing that should be read before it is trusted.
+ */
+app.post('/api/catalog/recategorize', (req, res) => {
+  try {
+    const apply = req.query.apply === '1' || (req.body || {}).apply === true;
+
+    const changes: { id: string; name: string; from: string; to: string }[] = [];
+    let manualSkipped = 0;
+
+    for (const product of db.getMasterProducts()) {
+      if (product.categorySource === 'manual') {
+        manualSkipped++;
+        continue;
+      }
+      const guessed = guessCategory(product.name);
+      if (guessed === product.category) continue;
+      changes.push({ id: product.id, name: product.name, from: product.category, to: guessed });
+    }
+
+    if (!apply) {
+      return res.json({ dryRun: true, wouldChange: changes.length, manualSkipped, changes });
+    }
+
+    let itemsRelabelled = 0;
+    for (const change of changes) {
+      itemsRelabelled += setProductCategory(change.id, change.to, 'guessed').itemsRelabelled;
+    }
+
+    res.json({
+      dryRun: false,
+      changed: changes.length,
+      manualSkipped,
+      itemsRelabelled,
+      changes,
+    });
+  } catch (err: any) {
+    console.error('Recategorise failed:', err);
+    res.status(500).json({ error: err.message || 'Recategorise failed' });
   }
 });
 

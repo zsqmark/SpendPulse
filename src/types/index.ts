@@ -433,6 +433,15 @@ export interface MasterProduct {
   sku: string;
   name: string;
   category: string;
+  /**
+   * How the category was decided.
+   *
+   * 'guessed' (or absent, for rows written before this existed) means the importer's
+   * keyword rules chose it and a re-run may choose again. 'manual' means the owner set it:
+   * nothing may overwrite it, and it takes precedence over the description - including in
+   * the weight-pricing rule, which otherwise files minced lemongrass as butchery.
+   */
+  categorySource?: 'guessed' | 'manual';
   standardUnit: string;
   standardPackSize?: string;
   /**

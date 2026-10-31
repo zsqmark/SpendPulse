@@ -382,8 +382,30 @@ export default function App() {
     }
   };
 
-  const handleRebuildPriceHistory = async () => {
+  /**
+   * Files a product under a category the owner picked.
+   *
+   * Returns an error message instead of throwing, because the card shows the refusal in
+   * place - a category that silently failed to save is worse than one that says so.
+   */
+  const handleSetCategory = async (productId: string, category: string): Promise<string | null> => {
     try {
+      const res = await fetch(apiUrl(`/api/catalog/${productId}/category`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return data?.error || `Category change failed (${res.status})`;
+      await loadData();
+      return null;
+    } catch (err: any) {
+      console.error('Failed to change category:', err);
+      return err?.message || 'Category change failed';
+    }
+  };
+
+  const handleRebuildPriceHistory = async () => {    try {
       const res = await fetch(apiUrl('/api/catalog/rebuild-price-history'), { method: 'POST' });
       if (res.ok) {
         const result = await res.json();
@@ -606,6 +628,7 @@ export default function App() {
                 onViewProductTrends={handleViewProductTrends}
                 onRebuildPriceHistory={handleRebuildPriceHistory}
                 onJumpToInvoice={handleInvoiceJump}
+                onSetCategory={handleSetCategory}
               />
             )}
 

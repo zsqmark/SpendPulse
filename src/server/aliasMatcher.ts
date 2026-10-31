@@ -203,24 +203,39 @@ export function isNonProductLine(rawDescription: string): boolean {
 // Meat detection lives in src/lib/meatPricing.ts so the browser can use the very same
 // rule - two copies of the keyword list would drift apart.
 export { MEAT_CATEGORY } from '../lib/meatPricing.ts';
-import { MEAT_CATEGORY, MEAT_PATTERN } from '../lib/meatPricing.ts';
+import { isMeatDescription, MEAT_CATEGORY } from '../lib/meatPricing.ts';
+import { DEFAULT_CATEGORY } from '../lib/categories.ts';
 
+/**
+ * Words that place a line in a category, tried in this order.
+ *
+ * Meat is not in the list: it is decided by `isMeatDescription`, which vetoes the butchery
+ * words when the line also names a plant or a spice. Filing `LEMON GRASS MINCE` and
+ * `MEAT CURRY POWDER` as meat was the whole reason for that rule, so the meat test has to
+ * be able to say "no" before the hints below get their turn.
+ */
 const CATEGORY_HINTS: Array<[RegExp, string]> = [
-  [MEAT_PATTERN, MEAT_CATEGORY],
-  [/\b(fish|salmon|prawn|shrimp|seafood|squid|crab)\b/i, 'Seafood'],
+  [/\b(fish|salmon|prawn|shrimp|seafood|squid|crab|tuna|oyster|mussel|scallop)\b/i, 'Seafood'],
   [/\b(milk|cream|butter|cheese|yoghurt|yogurt|egg|dairy)\b/i, 'Dairy & Eggs'],
-  [/\b(flour|sugar|rice|pasta|noodle|oil|salt|spice|herb|cereal|bean|lentil)\b/i, 'Dry Goods'],
-  [/\b(tomato|lettuce|onion|potato|carrot|salad|fruit|vegetable|veg|apple|lemon)\b/i, 'Produce'],
+  [
+    /\b(flour|sugar|rice|pasta|noodle|oil|salt|spice|curry|powder|seasoning|paste|stock|sauce|vinegar|baking|yeast|herb|cereal|bean|lentil|gelatine|gelatin|colouring|flavouring)\b/i,
+    'Dry Goods',
+  ],
+  [
+    /\b(tomato|lettuce|onion|potato|carrot|salad|fruit|vegetable|veg|apple|lemon\s*grass|lemongrass|lemon|garlic|ginger|chilli|chili|shallot|spring\s*onion|cabbage|broccoli|cauliflower|mushroom|cucumber|pumpkin|spinach|bean\s*sprout|avocado|mango|banana|pineapple)\b/i,
+    'Produce',
+  ],
   [/\b(frozen|ice\s*cream)\b/i, 'Frozen'],
   [/\b(detergent|cleaner|sanitiser|sanitizer|soap|bleach|degreaser|towel|napkin|glove|bag|wrap|foil|container)\b/i, 'Cleaning & Disposables'],
   [/\b(beer|wine|spirit|soft\s*drink|juice|coffee|tea|beverage|syrup)\b/i, 'Beverages'],
 ];
 
 export function guessCategory(rawDescription: string): string {
+  if (isMeatDescription(rawDescription)) return MEAT_CATEGORY;
   for (const [pattern, category] of CATEGORY_HINTS) {
     if (pattern.test(rawDescription)) return category;
   }
-  return 'General Supplies';
+  return DEFAULT_CATEGORY;
 }
 
 export function calculateTokenSimilarity(setA: Set<string>, setB: Set<string>): number {
@@ -746,6 +761,7 @@ function autoCreateMasterProduct(group: MatchInputItem[], vendorName: string): M
     sku: first.supplierSku?.trim() || `AUTO-${name.slice(0, 14).replace(/[^a-z0-9]+/gi, '-').toUpperCase()}`,
     name,
     category: guessCategory(name),
+    categorySource: 'guessed',
     standardUnit: first.unit || 'ea',
     standardPackSize: canonicalPack || undefined,
     currentPrice: unitPrice,

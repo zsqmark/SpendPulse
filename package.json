@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "test:alignment": "tsx scripts/test-alignment.ts",
     "test:units": "tsx scripts/test-pack-units.ts",
-    "test:jump": "tsx scripts/test-invoice-focus.ts"
+    "test:jump": "tsx scripts/test-invoice-focus.ts",
+    "test:category": "tsx scripts/test-category.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

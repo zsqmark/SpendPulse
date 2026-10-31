@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { MasterProduct, Invoice, ProductLinesPayload, SplitOutcome } from '../types/index.ts';
 import { UnitChangeModal, type UnitChangeApi } from './UnitChangeModal.tsx';
 import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
+import { CATEGORY_OPTIONS } from '../lib/categories.ts';
 import {
   PackageCheck,
   Search,
@@ -69,6 +70,11 @@ interface MasterCatalogViewProps {
   onRebuildPriceHistory?: () => Promise<any>;
   /** Takes an invoice number through to the line it names. */
   onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
+  /**
+   * Files a product under a category the owner picked. Resolves to an error message, or
+   * null when it worked. Omitted means the category is read-only here.
+   */
+  onSetCategory?: (productId: string, category: string) => Promise<string | null>;
 }
 
 /**
@@ -129,6 +135,7 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   onViewProductTrends,
   onRebuildPriceHistory,
   onJumpToInvoice,
+  onSetCategory,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
@@ -213,7 +220,10 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   } | null>(null);
 
   const [newProdName, setNewProdName] = useState('');
-  const [newProdCategory, setNewProdCategory] = useState('Dry Goods & Baking');
+  const [newProdCategory, setNewProdCategory] = useState<string>('Dry Goods');
+  /** Which card is mid-change, and the last refusal it gave. */
+  const [categoryBusyId, setCategoryBusyId] = useState<string | null>(null);
+  const [categoryNote, setCategoryNote] = useState<{ id: string; text: string } | null>(null);
   const [newProdUnit, setNewProdUnit] = useState('ea');
   const [newProdPackSize, setNewProdPackSize] = useState('');
   const [newProdSku, setNewProdSku] = useState('');
@@ -327,6 +337,15 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
       : selectedProducts[0]?.id || '';
   const mergeTarget = selectedProducts.find((p) => p.id === mergeTargetId) || null;
   const canMerge = selectedProducts.length >= 2 && !!mergeTarget;
+
+  const changeCategory = async (productId: string, category: string) => {
+    if (!onSetCategory) return;
+    setCategoryBusyId(productId);
+    setCategoryNote(null);
+    const error = await onSetCategory(productId, category);
+    setCategoryBusyId(null);
+    if (error) setCategoryNote({ id: productId, text: error });
+  };
 
   const toggleMergeSelection = (id: string) => {
     setMergeResult(null);
@@ -1151,7 +1170,53 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                         {prod.sku}
                       </span>
                       <span className="text-xs text-slate-400">·</span>
-                      <span className="text-xs text-slate-300 font-medium">{prod.category}</span>
+                      {onSetCategory ? (
+                        <span className="inline-flex items-center gap-1">
+                          {/* The guess is a convenience, not an authority: "LEMON GRASS
+                              MINCE" and "MEAT CURRY POWDER" are not butchery. Choosing here
+                              stores the choice as the owner's, and nothing re-guesses it. */}
+                          <select
+                            value={prod.category}
+                            disabled={categoryBusyId === prod.id}
+                            onChange={(e) => changeCategory(prod.id, e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            title={
+                              prod.categorySource === 'manual'
+                                ? 'Category set by you - the importer will not change it'
+                                : 'Category guessed from the product name - pick one to fix it'
+                            }
+                            className={`text-xs font-medium bg-slate-900 border rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-500/60 cursor-pointer disabled:opacity-50 ${
+                              prod.categorySource === 'manual'
+                                ? 'text-emerald-300 border-emerald-800/60'
+                                : 'text-slate-300 border-slate-800'
+                            }`}
+                          >
+                            {/* A stored value that is not in the list must still show, or the
+                                card would silently claim a category it does not have. */}
+                            {!CATEGORY_OPTIONS.includes(prod.category as any) && (
+                              <option value={prod.category}>{prod.category}</option>
+                            )}
+                            {CATEGORY_OPTIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                          {prod.categorySource === 'manual' && (
+                            <span
+                              title="Set by you. A recategorise sweep skips it."
+                              className="text-[9px] font-mono text-emerald-400/80"
+                            >
+                              yours
+                            </span>
+                          )}
+                          {categoryNote?.id === prod.id && (
+                            <span className="text-[10px] text-rose-400">{categoryNote.text}</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-300 font-medium">{prod.category}</span>
+                      )}
                       {prod.standardPackSize && (
                         <>
                           <span className="text-slate-600">·</span>
@@ -1483,13 +1548,13 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                     onChange={(e) => setNewProdCategory(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-blue-500"
                   >
-                    <option value="Dry Goods & Baking">Dry Goods & Baking</option>
-                    <option value="Dairy & Eggs">Dairy & Eggs</option>
-                    <option value="Oils & Shortening">Oils & Shortening</option>
-                    <option value="Produce & Fresh">Produce & Fresh</option>
-                    <option value="Meat & Seafood">Meat & Seafood</option>
-                    <option value="Packaging & Disposables">Packaging & Disposables</option>
-                    <option value="Chemicals & Sanitation">Chemicals & Sanitation</option>
+                    {/* The same list the classifier produces. Offering a different set of
+                        names here is how "Dry Goods & Baking" ended up beside "Dry Goods". */}
+                    {CATEGORY_OPTIONS.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
                   </select>
                 </div>
 

@@ -15,9 +15,30 @@
 
 export const MEAT_CATEGORY = 'Meat & Poultry';
 
-/** Product words that mark a line as meat. Extended here in one place for both sides. */
-export const MEAT_PATTERN =
-  /\b(beef|pork|lamb|chicken|poultry|meat|sausage|bacon|ribs|steak|mince)\b/i;
+/**
+ * Words that name an animal. These settle the question on their own: "BEEF MINCE" is
+ * meat however the rest of the line reads.
+ */
+export const ANIMAL_PATTERN =
+  /\b(beef|pork|lamb|chicken|poultry|turkey|duck|goat|venison|ham|chorizo|salami)\b/i;
+
+/**
+ * Butchery words that are not animals. `MINCE`, `STEAK`, `SAUSAGE`, `BACON`, `RIBS` are
+ * what a butcher prints, but the same words describe groceries: the supplier writes
+ * `LEMON GRASS MINCE` and `GARLIC MINCE` for minced aromatics, and `MEAT CURRY POWDER`
+ * is a spice mix. So these only count as meat when nothing plant-like is also named.
+ */
+export const GENERIC_MEAT_PATTERN = /\b(meat|mince|minced|sausage|bacon|ribs|steak)\b/i;
+
+/**
+ * Plant, spice and preparation words that veto the words above.
+ *
+ * Without this veto "AI LEMON GRASS MINCE 20*500G" (a 10kg carton of minced lemongrass),
+ * "NP FRESH GARLIC MINCE" and "BABA' MEAT CURRY POWDER" were all filed under Meat &
+ * Poultry, which then applied the weight-pricing rule to them.
+ */
+export const NON_MEAT_PATTERN =
+  /\b(lemon\s*grass|lemongrass|garlic|ginger|chilli|chili|shallot|onion|galangal|turmeric|coriander|basil|mint|herb|spice|curry|powder|paste|seasoning|stock|sauce|vinegar|tofu|beancurd|bean\s*curd|mushroom|mock\s*meat|vegetarian|vegan)\b/i;
 
 /** True when a description (and any brand text) names a meat product. */
 export function isMeatDescription(
@@ -25,7 +46,10 @@ export function isMeatDescription(
   brand?: string | null
 ): boolean {
   const text = `${description ?? ''} ${brand ?? ''}`.trim();
-  return !!text && MEAT_PATTERN.test(text);
+  if (!text) return false;
+  if (ANIMAL_PATTERN.test(text)) return true;
+  if (!GENERIC_MEAT_PATTERN.test(text)) return false;
+  return !NON_MEAT_PATTERN.test(text);
 }
 
 /** Same test, applied to a line item. */

@@ -139,17 +139,26 @@ export function basePriceFor(
  * never silently repriced to force a comparison - an unpriceable meat line is simply
  * left as recorded.
  */
-export function applyWeightPricing(item: {
-  rawDescription?: string | null;
-  brand?: string | null;
-  unit?: string | null;
-  unitPrice?: number | null;
-  quantity?: number | null;
-  weight?: number | null;
-  totalPrice?: number | null;
-}): { unitPrice: number | null; unit: string | null } {
+export function applyWeightPricing(
+  item: {
+    rawDescription?: string | null;
+    brand?: string | null;
+    unit?: string | null;
+    unitPrice?: number | null;
+    quantity?: number | null;
+    weight?: number | null;
+    totalPrice?: number | null;
+  },
+  /**
+   * The catalogue entry this line belongs to, when it is known. A category the owner set
+   * by hand outranks the keyword guess - that is the whole point of setting it.
+   */
+  product?: MasterProduct | null
+): { unitPrice: number | null; unit: string | null } {
   const untouched = { unitPrice: item.unitPrice ?? null, unit: item.unit ?? null };
-  if (!isMeatProduct(`${item.rawDescription ?? ''} ${item.brand ?? ''}`.trim())) return untouched;
+  if (!isMeatProduct(`${item.rawDescription ?? ''} ${item.brand ?? ''}`.trim(), product)) {
+    return untouched;
+  }
 
   const total = Number(item.totalPrice);
   if (!(total > 0)) return untouched;
@@ -194,8 +203,18 @@ function resolveWeightKg(item: {
   return null;
 }
 
-/** True for the products whose price only makes sense per kilogram. */
-function isMeatProduct(description: string): boolean {
+/**
+ * True for the products whose price only makes sense per kilogram.
+ *
+ * A category the owner set by hand wins outright: "file this under Produce" has to mean
+ * the weight rule stops applying, otherwise the override would only repaint the badge.
+ * Everything else is decided from the description, which is what the importer has.
+ */
+export function isMeatProduct(
+  description: string,
+  product?: MasterProduct | null
+): boolean {
+  if (product?.categorySource === 'manual') return product.category === MEAT_CATEGORY;
   return !!description && guessCategory(description) === MEAT_CATEGORY;
 }
 
