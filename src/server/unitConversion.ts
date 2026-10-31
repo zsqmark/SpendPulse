@@ -26,6 +26,22 @@ const AGGREGATE_PACK_UNITS = ['case', 'carton', 'ctn', 'cs'];
 /** Single-container units: each one names exactly one container of the pack size. */
 const SINGLE_CONTAINER_PACK_UNITS = PACK_UNITS.filter((u) => !AGGREGATE_PACK_UNITS.includes(u));
 
+/**
+ * True for the units that name a whole case (carton, case, ctn, cs).
+ *
+ * The distinction matters when two sources disagree about a pack: a carton's content is
+ * what the catalogue knows, while "bag"/"bottle"/"pack" name one container and are better
+ * described by the pack printed on the invoice itself.
+ */
+export function isAggregatePackUnit(unit?: string | null): boolean {
+  return AGGREGATE_PACK_UNITS.includes(canonicalUnitOf(unit));
+}
+
+/** Local unit normaliser - the shared one in this file is private to the conversions. */
+function canonicalUnitOf(unit?: string | null): string {
+  return (unit || '').trim().toLowerCase().replace(/[.]+$/, '');
+}
+
 export interface UnitConversions {
   /** The measure every price of this product is normalised to. */
   baseUnit: BaseUnit;

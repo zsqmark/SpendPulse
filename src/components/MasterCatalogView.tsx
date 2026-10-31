@@ -1266,7 +1266,10 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                   {/* Pricing Overview & Trends Button */}
                   <div className="flex flex-wrap items-center gap-6 font-mono text-xs shrink-0">
                     <div>
-                      <span className="text-slate-500 block text-[10px] uppercase">Current Rate</span>
+                      {/* Named for what it is. A 20kg bag against a 10kg bag made "Current
+                          Rate" look like a doubling; the comparable per-kg figure is the
+                          Quoted At beside it. */}
+                      <span className="text-slate-500 block text-[10px] uppercase">Last Invoiced</span>
                       <span className="text-base font-bold text-slate-100 tabular-nums">
                         ${prod.currentPrice.toFixed(2)}
                       </span>

@@ -15,6 +15,7 @@ import {
   toBasePrice,
   fromBasePrice,
   baseUnitForDirectUnit,
+  isAggregatePackUnit,
   WEIGHT_IN_KG,
   VOLUME_IN_L,
   type BaseUnit,
@@ -65,32 +66,55 @@ export function basePriceFor(
   unit?: string | null,
   packSize?: string | null
 ): number | null {
+  const productBase = product.baseUnit as BaseUnit | undefined;
+
+  // Which pack to divide by, when the line and the catalogue disagree.
+  //
+  // The pack printed on THIS line describes what was delivered, so for a unit that names
+  // one container (bag, bottle, pack, tin...) it is the better divisor: a 10kg bag of a
+  // rice whose catalogue pack says 20kg is $32 / 10kg = $3.20/kg, not $1.60/kg. For a
+  // whole case (carton/case) the catalogue wins, because OCR drops the leading "6*" often
+  // enough that a "2kg" carton would be divided by 2 instead of 12.
+  //
+  // A pack that parses into a DIFFERENT base measure is ignored either way: a kg product
+  // must never be given a per-litre price.
+  const lineTable = buildUnitConversions(packSize);
+  const sameMeasure =
+    lineTable != null &&
+    (!productBase || productBase === 'each' || productBase === lineTable.baseUnit);
+
+  if (lineTable && sameMeasure) {
+    const invoiced = (unit || '').trim().toLowerCase().replace(/[.]+$/, '');
+    const productKnowsUnit = Boolean(product.unitConversions && invoiced in product.unitConversions);
+    const lineWins = !isAggregatePackUnit(invoiced) || !productKnowsUnit;
+
+    if (lineWins) {
+      const viaLine = toBasePrice(
+        unitPrice,
+        unit ?? undefined,
+        lineTable.conversions,
+        lineTable.baseUnit
+      );
+      if (viaLine != null) {
+        // Keep what this line proved, so the next invoice does not depend on luck.
+        if (!product.baseUnit || product.baseUnit === 'each') {
+          product.unitConversions = { ...lineTable.conversions };
+          product.baseUnit = lineTable.baseUnit;
+        } else if (product.baseUnit === lineTable.baseUnit) {
+          product.unitConversions = mergeConversions(product.unitConversions, lineTable.conversions);
+        }
+        return viaLine;
+      }
+    }
+  }
+
   const normal = toBasePrice(
     unitPrice,
     unit ?? undefined,
     product.unitConversions,
-    product.baseUnit as BaseUnit | undefined
+    productBase
   );
   if (normal != null) return normal;
-
-  // The product's own table may not cover this unit yet - typically because every earlier
-  // pack string was unreadable. The pack printed on THIS line is a second, equally valid
-  // source, and one good reading is all a conversion needs. Without this a single bad pack
-  // string early on leaves every later invoice uncomparable.
-  const lineTable = buildUnitConversions(packSize);
-  if (lineTable) {
-    const viaLine = toBasePrice(unitPrice, unit ?? undefined, lineTable.conversions, lineTable.baseUnit);
-    if (viaLine != null) {
-      // Keep what this line proved, so the next invoice does not depend on luck.
-      if (!product.baseUnit || product.baseUnit === 'each') {
-        product.unitConversions = { ...lineTable.conversions };
-        product.baseUnit = lineTable.baseUnit;
-      } else if (product.baseUnit === lineTable.baseUnit) {
-        product.unitConversions = mergeConversions(product.unitConversions, lineTable.conversions);
-      }
-      return viaLine;
-    }
-  }
 
   // Fallback: a line invoiced in a base measure (kg / g / l / ml / each) with a price is
   // comparable on that unit by itself. No pack size is required, and the product name is
