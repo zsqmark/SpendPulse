@@ -263,12 +263,27 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
     setSaveNote(null);
   };
 
+  /**
+   * A page the viewer can actually show.
+   *
+   * Line items record their page relative to their own invoice, but a long statement stores
+   * the ABSOLUTE scan numbers (page 29 of the PDF, invoice 1 of 30). The two do not agree,
+   * so a stored page number has to be checked against the archived pages before use - asking
+   * for page 1 of an invoice whose scans are pages 29-30 would show nothing at all.
+   */
+  const storedPage = (inv: Invoice, wanted?: number | null): number => {
+    const pages = inv.documentPages ?? [];
+    if (pages.length === 0) return 1;
+    if (wanted && pages.some((p) => p.pageNumber === wanted)) return wanted;
+    return pages[0].pageNumber;
+  };
+
   /** Clicking any row opens the inspector on the original scan when we archived it. */
   const openInvoice = (inv: Invoice) => {
     setEditingItemId(null);
     setSaveNote(null);
     setSelectedInvoice(inv);
-    setActivePage(1);
+    setActivePage(storedPage(inv, 1));
     setZoomPct(100);
     setImageError(false);
     setDetailTab(inv.documentPages && inv.documentPages.length > 0 ? 'source' : 'items');
@@ -311,13 +326,13 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
     if (item) {
       // Land on the line: open the extracted items and the right scan page behind them.
       setDetailTab('items');
-      setActivePage(item.pageNumber || 1);
+      setActivePage(storedPage(invoice, item.pageNumber));
       setFocusedRow({ itemId: item.id, nonce: focusTarget.nonce });
     } else if (lineRequested) {
       // The invoice exists but the product is not on it. Show the invoice anyway and say
       // so - silently opening row one would look like the link was wrong.
       setDetailTab(invoice.documentPages && invoice.documentPages.length > 0 ? 'source' : 'items');
-      setActivePage(1);
+      setActivePage(storedPage(invoice, 1));
       setFocusedRow(null);
       setJumpNote(
         `Opened invoice ${invoice.invoiceNumber}, but this product has no line on it.`
@@ -325,7 +340,7 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
     } else {
       // The link named an invoice but no line. Nothing is wrong, so nothing is flagged.
       setDetailTab('items');
-      setActivePage(1);
+      setActivePage(storedPage(invoice, 1));
       setFocusedRow(null);
     }
     setZoomPct(100);
