@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:alignment": "tsx scripts/test-alignment.ts",
-    "test:units": "tsx scripts/test-pack-units.ts"
+    "test:units": "tsx scripts/test-pack-units.ts",
+    "test:jump": "tsx scripts/test-invoice-focus.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

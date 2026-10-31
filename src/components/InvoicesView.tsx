@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Invoice, InvoiceItem } from '../types/index.ts';
 import { apiUrl } from '../lib/apiBase.ts';
+import { lineDomId, resolveInvoiceJump } from '../lib/invoiceFocus.ts';
 import {
   FileText,
   Search,
@@ -36,6 +37,7 @@ import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
 import { describeNotComparable } from '../lib/comparisonReason.ts';
 import { describeFieldAlignment } from '../lib/alignmentLabels.ts';
 import type {
+  InvoiceFocusTarget,
   LineAlignment,
   LineItemPatch,
   LineItemUpdateResult,
@@ -46,6 +48,16 @@ interface InvoicesViewProps {
   onOpenReviewModal?: (invoiceId: string, item: InvoiceItem) => void;
   onViewProductTrends?: (productId: string) => void;
   onOpenScan?: () => void;
+  /**
+   * A jump requested from another view: open this invoice and land on this line.
+   * `nonce` changes on every click, so the same link can be used twice.
+   */
+  focusTarget?: InvoiceFocusTarget | null;
+  /**
+   * Called once the target has been acted on, so the request is used exactly once. Without
+   * it, coming back to this tab later would silently reopen the last invoice jumped to.
+   */
+  onFocusHandled?: () => void;
   /** Saves a corrected line and re-runs the pack-aware price comparison. */
   onUpdateLineItem?: (
     invoiceId: string,
@@ -125,6 +137,8 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
   onViewProductTrends,
   onOpenScan,
   onUpdateLineItem,
+  focusTarget,
+  onFocusHandled,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [vendorFilter, setVendorFilter] = useState('all');
@@ -147,6 +161,10 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
   const [saveNote, setSaveNote] = useState<{ itemId: string; ok: boolean; text: string } | null>(
     null
   );
+  /** The line a jump landed on, kept only long enough to highlight and scroll to it. */
+  const [focusedRow, setFocusedRow] = useState<{ itemId: string; nonce: number } | null>(null);
+  /** Says so when a jump cannot be honoured, instead of doing nothing at all. */
+  const [jumpNote, setJumpNote] = useState<string | null>(null);
 
   const startEditing = (item: InvoiceItem) => {
     setEditingItemId(item.id);
@@ -260,6 +278,107 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
     setActivePage(pageNumber);
     setImageError(false);
   };
+
+  /**
+   * Honours a jump requested from another view.
+   *
+   * Keyed on the nonce rather than the contents, so clicking the same invoice link twice
+   * both times scrolls instead of the second click looking like no change. The filters are
+   * cleared first: a jump that lands on an invoice the current search hides would appear
+   * to do nothing at all.
+   */
+  useEffect(() => {
+    if (!focusTarget) return;
+    setJumpNote(null);
+
+    const { invoice, item, lineRequested } = resolveInvoiceJump(focusTarget, invoices);
+    if (!invoice) {
+      setJumpNote(
+        `Invoice ${focusTarget.invoiceNumber || focusTarget.invoiceId || ''} is not in the current data - it may have been deleted.`
+      );
+      // The request has been answered (with "no"), so it must not fire again on a remount.
+      onFocusHandled?.();
+      return;
+    }
+
+    setSearchTerm('');
+    setVendorFilter('all');
+    setStatusFilter('all');
+    setEditingItemId(null);
+    setSaveNote(null);
+    setSelectedInvoice(invoice);
+
+    if (item) {
+      // Land on the line: open the extracted items and the right scan page behind them.
+      setDetailTab('items');
+      setActivePage(item.pageNumber || 1);
+      setFocusedRow({ itemId: item.id, nonce: focusTarget.nonce });
+    } else if (lineRequested) {
+      // The invoice exists but the product is not on it. Show the invoice anyway and say
+      // so - silently opening row one would look like the link was wrong.
+      setDetailTab(invoice.documentPages && invoice.documentPages.length > 0 ? 'source' : 'items');
+      setActivePage(1);
+      setFocusedRow(null);
+      setJumpNote(
+        `Opened invoice ${invoice.invoiceNumber}, but this product has no line on it.`
+      );
+    } else {
+      // The link named an invoice but no line. Nothing is wrong, so nothing is flagged.
+      setDetailTab('items');
+      setActivePage(1);
+      setFocusedRow(null);
+    }
+    setZoomPct(100);
+    setImageError(false);
+    onFocusHandled?.();
+    // Deliberately keyed on the nonce only: re-running on every invoice refresh would
+    // yank the page back while the reader is working.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTarget?.nonce]);
+
+  /**
+   * Scrolls to the focused row once it is actually in the DOM.
+   *
+   * Two frames: the first lets the items tab render, the second lets the table lay out, so
+   * the element is measurable and the scroll lands on it rather than near it.
+   */
+  useEffect(() => {
+    if (!focusedRow) return;
+    let cancelled = false;
+
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        const el = document.getElementById(lineDomId(focusedRow.itemId));
+        if (!el) return;
+        const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+        el.scrollIntoView({
+          behavior: reduceMotion ? 'auto' : 'smooth',
+          block: 'center',
+          inline: 'nearest',
+        });
+      });
+    });
+
+    // The highlight is a "here it is" marker, not a selection - it fades by itself.
+    const fade = window.setTimeout(() => {
+      if (!cancelled) setFocusedRow(null);
+    }, 3600);
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      window.clearTimeout(fade);
+    };
+  }, [focusedRow]);
+
+  // The note is an explanation, not a permanent state - it clears itself so it does not
+  // sit over the table saying something that has stopped being true.
+  useEffect(() => {
+    if (!jumpNote) return;
+    const timer = window.setTimeout(() => setJumpNote(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [jumpNote]);
 
   const selectedPages = selectedInvoice?.documentPages ?? [];
   // Page URLs are stored as server-relative paths, so they need the API host prefixed
@@ -717,9 +836,14 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                       <tbody className="divide-y divide-slate-850">
                         {selectedInvoice.items.map((item) => (
                           <React.Fragment key={item.id}>
+                          {/* The id makes this row a jump target - without it there is
+                              nothing for scrollIntoView to land on. */}
                           <tr
+                            id={lineDomId(item.id)}
                             className={
-                              editingItemId === item.id
+                              focusedRow?.itemId === item.id
+                                ? 'bg-blue-500/15 ring-1 ring-inset ring-blue-400/60 transition-colors duration-500'
+                                : editingItemId === item.id
                                 ? 'bg-blue-950/30'
                                 : 'hover:bg-slate-900/40'
                             }
@@ -1136,6 +1260,24 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                 Close Inspector
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* A jump that could not be honoured says so. Fixed above the inspector, because
+          the modal is exactly where the reader is looking when one of them fails. */}
+      {jumpNote && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[60] max-w-md">
+          <div className="flex items-start gap-2 px-3.5 py-2.5 rounded-lg bg-slate-900/95 border border-amber-500/40 shadow-xl backdrop-blur">
+            <Info className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+            <span className="text-xs text-slate-200 leading-snug">{jumpNote}</span>
+            <button
+              onClick={() => setJumpNote(null)}
+              className="text-slate-500 hover:text-slate-200 text-xs leading-none ml-1"
+              title="Dismiss"
+            >
+              ✕
+            </button>
           </div>
         </div>
       )}

@@ -26,7 +26,9 @@ import {
   UnitChangePreview,
   UnitChangeScope,
   UnitChangeResult,
+  InvoiceFocusTarget,
 } from './types/index.ts';
+import type { InvoiceJumpRequest } from './components/InvoiceJumpLink.tsx';
 import type {
   UnitChangeApi,
   UnitChangeContext,
@@ -59,6 +61,8 @@ export default function App() {
   const [isScanModalOpen, setIsScanModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [selectedTrendProductId, setSelectedTrendProductId] = useState<string | undefined>(undefined);
+  /** Where an invoice-number link wants the Invoices view to land. */
+  const [focusTarget, setFocusTarget] = useState<InvoiceFocusTarget | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Load all initial data from server
@@ -398,6 +402,18 @@ export default function App() {
     setActiveTab('trends');
   };
 
+  /**
+   * Takes the reader to one line of one invoice, from anywhere an invoice number is shown.
+   *
+   * The nonce is what makes a repeated click work: the target object is otherwise identical
+   * the second time, so without something that changes it React would see no change and the
+   * page would stay where it was.
+   */
+  const handleInvoiceJump = (target: InvoiceJumpRequest) => {
+    setFocusTarget({ ...target, nonce: Date.now() });
+    setActiveTab('invoices');
+  };
+
   const handleNormalizeVendors = async () => {
     try {
       const res = await fetch(apiUrl('/api/vendors/normalize'), { method: 'POST' });
@@ -561,6 +577,8 @@ export default function App() {
                 onViewProductTrends={handleViewProductTrends}
                 onOpenScan={() => setIsScanModalOpen(true)}
                 onUpdateLineItem={handleUpdateLineItem}
+                focusTarget={focusTarget}
+                onFocusHandled={() => setFocusTarget(null)}
               />
             )}
 
@@ -570,6 +588,7 @@ export default function App() {
                 onAcknowledge={handleAcknowledgeAlert}
                 onDispute={handleDisputeAlert}
                 onViewProductTrends={handleViewProductTrends}
+                onJumpToInvoice={handleInvoiceJump}
               />
             )}
 
@@ -586,6 +605,7 @@ export default function App() {
                 unitApi={unitApi}
                 onViewProductTrends={handleViewProductTrends}
                 onRebuildPriceHistory={handleRebuildPriceHistory}
+                onJumpToInvoice={handleInvoiceJump}
               />
             )}
 
@@ -594,6 +614,7 @@ export default function App() {
                 onResolved={() => {
                   loadData();
                 }}
+                onJumpToInvoice={handleInvoiceJump}
               />
             )}
 
@@ -611,6 +632,7 @@ export default function App() {
                 products={masterProducts}
                 selectedProductId={selectedTrendProductId}
                 onSelectProduct={setSelectedTrendProductId}
+                onJumpToInvoice={handleInvoiceJump}
               />
             )}
 

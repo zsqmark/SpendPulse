@@ -478,6 +478,27 @@ export interface MasterProduct {
   }[];
 }
 
+/**
+ * Where an invoice link should land.
+ *
+ * Any place that prints an invoice number can turn it into a link with this: the app
+ * switches to the invoice view, opens that invoice, scrolls to the line and marks it.
+ */
+export interface InvoiceFocusTarget {
+  /** Preferred: exact invoice. Falls back to the number when the id is unknown. */
+  invoiceId?: string | null;
+  invoiceNumber?: string | null;
+  /** The line to land on. */
+  itemId?: string | null;
+  /** Matched when the line id is stale, so a rebuild does not break the link. */
+  masterProductId?: string | null;
+  /**
+   * Changes on every click. Two clicks on the same link must both scroll, so the
+   * request cannot be recognised by its contents alone.
+   */
+  nonce: number;
+}
+
 /** What the user is allowed to correct on one extracted line. */
 export interface LineItemPatch {
   rawDescription?: string;

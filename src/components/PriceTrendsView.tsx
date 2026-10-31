@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { MasterProduct } from '../types/index.ts';
+import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
 import {
   TrendingUp,
   ArrowUpRight,
@@ -14,12 +15,15 @@ interface PriceTrendsViewProps {
   products: MasterProduct[];
   selectedProductId?: string;
   onSelectProduct: (id: string) => void;
+  /** Takes an invoice number through to the line it came from. */
+  onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
 }
 
 export const PriceTrendsView: React.FC<PriceTrendsViewProps> = ({
   products,
   selectedProductId,
   onSelectProduct,
+  onJumpToInvoice,
 }) => {
   const currentProduct =
     products.find((p) => p.id === selectedProductId) || products[0];
@@ -356,7 +360,15 @@ export const PriceTrendsView: React.FC<PriceTrendsViewProps> = ({
                 <tr key={i} className="hover:bg-slate-900/30">
                   <td className="py-2.5 px-4 font-mono text-slate-300">{h.date}</td>
                   <td className="py-2.5 px-4 font-medium text-slate-200">{h.vendor}</td>
-                  <td className="py-2.5 px-4 font-mono text-slate-400">{h.invoiceNumber}</td>
+                  <td className="py-2.5 px-4 font-mono text-slate-400">
+                    {/* History stores the invoice number only, so the product id is what
+                        carries the jump to the right line of that invoice. */}
+                    <InvoiceJumpLink
+                      invoiceNumber={h.invoiceNumber}
+                      masterProductId={currentProduct.id}
+                      onJump={onJumpToInvoice}
+                    />
+                  </td>
                   <td className="py-2.5 px-4 font-mono text-right font-bold text-slate-100 tabular-nums">
                     ${h.unitPrice.toFixed(2)} /{currentProduct.standardUnit}
                   </td>

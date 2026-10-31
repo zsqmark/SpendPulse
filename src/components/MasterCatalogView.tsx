@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MasterProduct, Invoice, ProductLinesPayload, SplitOutcome } from '../types/index.ts';
 import { UnitChangeModal, type UnitChangeApi } from './UnitChangeModal.tsx';
+import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
 import {
   PackageCheck,
   Search,
@@ -66,6 +67,8 @@ interface MasterCatalogViewProps {
    * which is what lets the pack hierarchy convert old prices.
    */
   onRebuildPriceHistory?: () => Promise<any>;
+  /** Takes an invoice number through to the line it names. */
+  onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
 }
 
 /**
@@ -125,6 +128,7 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
   unitApi,
   onViewProductTrends,
   onRebuildPriceHistory,
+  onJumpToInvoice,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
@@ -701,7 +705,13 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                           {vendorName}
                         </span>
                         <span className="text-slate-600">·</span>
-                        <span className="text-slate-400">#{invoiceNumber}</span>
+                        <InvoiceJumpLink
+                          prefix="#"
+                          invoiceNumber={invoiceNumber}
+                          invoiceId={invoiceId}
+                          itemId={item.id}
+                          onJump={onJumpToInvoice}
+                        />
                         <span className="text-slate-600">·</span>
                         <span>{invoiceDate}</span>
                         {item.pageNumber && (
@@ -1336,8 +1346,15 @@ export const MasterCatalogView: React.FC<MasterCatalogViewProps> = ({
                           )}
                         </div>
                         <div className="text-[11px] text-slate-500 font-mono">
-                          {line.invoiceDate} · {line.vendorName} · inv #{line.invoiceNumber} ·{' '}
-                          {line.packSize || line.unit || 'no unit'} · ${Number(line.unitPrice).toFixed(2)}
+                          {line.invoiceDate} · {line.vendorName} ·{' '}
+                          <InvoiceJumpLink
+                            prefix="inv #"
+                            invoiceNumber={line.invoiceNumber}
+                            invoiceId={line.invoiceId}
+                            itemId={line.itemId}
+                            onJump={onJumpToInvoice}
+                          />{' '}
+                          · {line.packSize || line.unit || 'no unit'} · ${Number(line.unitPrice).toFixed(2)}
                         </div>
                       </div>
                     </label>

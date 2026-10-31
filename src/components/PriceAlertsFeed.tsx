@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { PriceAlert } from '../types/index.ts';
+import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
 import {
   TrendingUp,
   AlertTriangle,
@@ -15,6 +16,8 @@ interface PriceAlertsFeedProps {
   onAcknowledge: (id: string) => void;
   onDispute: (id: string) => void;
   onViewProductTrends: (productId: string) => void;
+  /** Takes the invoice number through to the line that triggered the alert. */
+  onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
 }
 
 export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
@@ -22,6 +25,7 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
   onAcknowledge,
   onDispute,
   onViewProductTrends,
+  onJumpToInvoice,
 }) => {
   const [filter, setFilter] = useState<'all' | 'active' | 'acknowledged' | 'disputed'>('active');
 
@@ -122,7 +126,14 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono text-slate-400">{alert.vendorName}</span>
                       <span className="text-slate-600 text-xs">·</span>
-                      <span className="text-xs font-mono text-slate-500">{alert.invoiceNumber}</span>
+                      <InvoiceJumpLink
+                        className="text-xs font-mono"
+                        invoiceNumber={alert.invoiceNumber}
+                        invoiceId={alert.invoiceId}
+                        masterProductId={alert.masterProductId}
+                        onJump={onJumpToInvoice}
+                        title={`Open invoice ${alert.invoiceNumber} at this line`}
+                      />
                     </div>
                     <h3 className="text-sm font-semibold text-slate-100">
                       {alert.productName}

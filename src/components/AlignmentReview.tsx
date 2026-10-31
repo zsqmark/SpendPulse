@@ -12,6 +12,7 @@ import {
   SOURCE_LABEL,
   describeFieldAlignment,
 } from '../lib/alignmentLabels.ts';
+import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
 import { AlertTriangle, Check, History, Loader2, RefreshCw, ShieldQuestion, X } from 'lucide-react';
 
 /** One row of the review queue, as the API returns it. */
@@ -35,9 +36,11 @@ interface ReviewEntry {
 export interface AlignmentReviewProps {
   /** Called after a conflict is settled, so the invoice list behind it reloads. */
   onResolved?: () => void;
+  /** Opens the invoice line an alignment entry came from. */
+  onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
 }
 
-export const AlignmentReview: React.FC<AlignmentReviewProps> = ({ onResolved }) => {
+export const AlignmentReview: React.FC<AlignmentReviewProps> = ({ onResolved, onJumpToInvoice }) => {
   const [entries, setEntries] = useState<ReviewEntry[]>([]);
   const [log, setLog] = useState<AlignmentLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -163,6 +166,7 @@ export const AlignmentReview: React.FC<AlignmentReviewProps> = ({ onResolved }) 
               entry={entry}
               busy={busyId === entry.id}
               onResolve={resolve}
+              onJumpToInvoice={onJumpToInvoice}
             />
           ))}
         </div>
@@ -180,7 +184,7 @@ export const AlignmentReview: React.FC<AlignmentReviewProps> = ({ onResolved }) 
           ) : (
             <div className="divide-y divide-slate-800/60 max-h-[28rem] overflow-y-auto">
               {log.map((e) => (
-                <LogRow key={e.id} entry={e} />
+                <LogRow key={e.id} entry={e} onJumpToInvoice={onJumpToInvoice} />
               ))}
             </div>
           )}
@@ -194,14 +198,23 @@ const ConflictCard: React.FC<{
   entry: ReviewEntry;
   busy: boolean;
   onResolve: (entry: ReviewEntry, resolution: 'accepted_history' | 'kept_document') => void;
-}> = ({ entry, busy, onResolve }) => {
+  onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
+}> = ({ entry, busy, onResolve, onJumpToInvoice }) => {
   return (
     <div className="border border-amber-500/30 bg-amber-500/[0.04] rounded-xl p-4">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <div className="text-sm font-medium text-white truncate">{entry.itemDescription}</div>
           <div className="text-[11px] text-slate-400 font-mono mt-0.5">
-            {entry.vendorName} · {entry.invoiceNumber} · {IDENTITY_LABEL[entry.identityKind]}
+            {entry.vendorName} ·{' '}
+            <InvoiceJumpLink
+              invoiceNumber={entry.invoiceNumber}
+              invoiceId={entry.invoiceId}
+              itemId={entry.itemId}
+              masterProductId={entry.productId}
+              onJump={onJumpToInvoice}
+            />{' '}
+            · {IDENTITY_LABEL[entry.identityKind]}
             {entry.isFirstEntry && ' · first sighting'}
           </div>
         </div>
@@ -258,7 +271,10 @@ const ConflictCard: React.FC<{
   );
 };
 
-const LogRow: React.FC<{ entry: AlignmentLogEntry }> = ({ entry }) => {
+const LogRow: React.FC<{
+  entry: AlignmentLogEntry;
+  onJumpToInvoice?: (target: InvoiceJumpRequest) => void;
+}> = ({ entry, onJumpToInvoice }) => {
   const { resolved, summary } = useMemo(() => {
     const parts = entry.changes.map((f) => describeFieldAlignment(f).summary);
     return {
@@ -277,7 +293,14 @@ const LogRow: React.FC<{ entry: AlignmentLogEntry }> = ({ entry }) => {
         <div className="min-w-0">
           <div className="text-xs text-slate-200 truncate">{entry.itemDescription}</div>
           <div className="text-[11px] text-slate-500 font-mono">
-            {entry.vendorName} · {entry.invoiceNumber}
+            {entry.vendorName} ·{' '}
+            <InvoiceJumpLink
+              invoiceNumber={entry.invoiceNumber}
+              invoiceId={entry.invoiceId}
+              itemId={entry.itemId}
+              masterProductId={entry.productId}
+              onJump={onJumpToInvoice}
+            />
           </div>
         </div>
         <div className="text-[10px] text-slate-500 font-mono whitespace-nowrap">
