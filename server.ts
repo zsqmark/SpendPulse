@@ -2453,7 +2453,8 @@ app.post('/api/catalog/rebuild-price-history', (req, res) => {
           item.unitPrice,
           item.unit,
           invoice.invoiceNumber,
-          invoice.invoiceDate
+          invoice.invoiceDate,
+          item.packSize
         );
         item.previousPrice = cmp.previousPrice;
         item.priceDelta = cmp.deltaAmount;
