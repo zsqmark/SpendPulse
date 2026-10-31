@@ -2209,7 +2209,8 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
         unitPrice: item.unitPrice,
         invoiceNumber: invoice.invoiceNumber,
         unit: item.unit,
-        baseUnitPrice: basePriceFor(product, item.unitPrice, item.unit),
+        packSize: item.packSize ?? undefined,
+        baseUnitPrice: basePriceFor(product, item.unitPrice, item.unit, item.packSize),
       };
       if (target >= 0) product.priceHistory[target] = entry;
       else product.priceHistory.push(entry);
@@ -2220,7 +2221,8 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
         item.unitPrice,
         item.unit,
         invoice.invoiceNumber,
-        invoice.invoiceDate
+        invoice.invoiceDate,
+        item.packSize
       );
 
       // An alert raised by the wrong price is not a real increase - drop it, and only

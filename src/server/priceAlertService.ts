@@ -163,12 +163,13 @@ export function compareAgainstHistory(
   unitPrice: number,
   unit: string,
   invoiceNumber: string,
-  invoiceDate?: string
+  invoiceDate?: string,
+  packSize?: string | null
 ): PriceComparison {
-  const incomingBase = basePriceFor(product, unitPrice, unit);
+  const incomingBase = basePriceFor(product, unitPrice, unit, packSize);
   const prior = lastEntryBefore(product, invoiceNumber, invoiceDate);
   const priorUnit = prior?.unit || product.standardUnit;
-  const prevBase = prior ? basePriceFor(product, prior.unitPrice, priorUnit) : null;
+  const prevBase = prior ? basePriceFor(product, prior.unitPrice, priorUnit, prior.packSize) : null;
 
   // When the line is priced in a base measure, show that measure on the line (e.g. a
   // "per kg" line reads /kg even if the product's catalogue base was set to "each").
@@ -493,7 +494,7 @@ export function checkAndRecordPriceChange(params: {
   // Teach the product how many packs are in a carton before any price is compared.
   if (packSize) learnPackHierarchy(product, packSize);
 
-  const comparison = compareAgainstHistory(product, unitPrice, unit, invoiceNumber, invoiceDate);
+  const comparison = compareAgainstHistory(product, unitPrice, unit, invoiceNumber, invoiceDate, packSize);
 
   const result: PriceCheckResult = {
     hasPriceIncrease: false,
@@ -542,6 +543,9 @@ export function checkAndRecordPriceChange(params: {
     unitPrice,
     invoiceNumber,
     unit: unit || undefined,
+    // Kept so a later recalculation can still convert this entry when the product's own
+    // table does not cover its unit - the pack on the invoice is the evidence.
+    packSize: packSize || undefined,
     baseUnitPrice: comparison.baseUnitPrice,
   });
   recalculateProductStats(product);

@@ -29,12 +29,28 @@ export function learnPackHierarchy(product: MasterProduct, packSize?: string | n
   const learned = buildUnitConversions(packSize);
   if (!learned) return false;
 
-  const knownBefore = product.unitConversions ? Object.keys(product.unitConversions).length : 0;
-  const merged = mergeConversions(product.unitConversions, learned.conversions);
-
   // A product is measured by weight or by volume, not both. If a later invoice reports
   // the other measure, the pack size is probably OCR noise - keep the original.
-  if (product.baseUnit && product.baseUnit !== learned.baseUnit) return false;
+  //
+  // 'each' is the exception, and it matters: a count says nothing about what is inside
+  // the container, so a product that only ever got as far as "one each" is not committed
+  // to a measure at all. Refusing to upgrade from it means one bad pack string early on
+  // can lock the product out of every good reading that arrives afterwards.
+  const existingBase = product.baseUnit;
+  const upgradingFromCount = existingBase === 'each';
+  if (existingBase && existingBase !== learned.baseUnit && !upgradingFromCount) return false;
+
+  if (upgradingFromCount) {
+    // The table that came with 'each' is the degenerate { each: 1 } - meaningless once the
+    // product is measured by weight or volume, and actively wrong if merged ('each' would
+    // keep its old value of 1 instead of the real content of one container). Replace it.
+    product.unitConversions = { ...learned.conversions };
+    product.baseUnit = learned.baseUnit;
+    return true;
+  }
+
+  const knownBefore = product.unitConversions ? Object.keys(product.unitConversions).length : 0;
+  const merged = mergeConversions(product.unitConversions, learned.conversions);
 
   product.unitConversions = merged;
   if (!product.baseUnit) product.baseUnit = learned.baseUnit;
@@ -46,7 +62,8 @@ export function learnPackHierarchy(product: MasterProduct, packSize?: string | n
 export function basePriceFor(
   product: MasterProduct,
   unitPrice: number,
-  unit?: string | null
+  unit?: string | null,
+  packSize?: string | null
 ): number | null {
   const normal = toBasePrice(
     unitPrice,
@@ -55,6 +72,25 @@ export function basePriceFor(
     product.baseUnit as BaseUnit | undefined
   );
   if (normal != null) return normal;
+
+  // The product's own table may not cover this unit yet - typically because every earlier
+  // pack string was unreadable. The pack printed on THIS line is a second, equally valid
+  // source, and one good reading is all a conversion needs. Without this a single bad pack
+  // string early on leaves every later invoice uncomparable.
+  const lineTable = buildUnitConversions(packSize);
+  if (lineTable) {
+    const viaLine = toBasePrice(unitPrice, unit ?? undefined, lineTable.conversions, lineTable.baseUnit);
+    if (viaLine != null) {
+      // Keep what this line proved, so the next invoice does not depend on luck.
+      if (!product.baseUnit || product.baseUnit === 'each') {
+        product.unitConversions = { ...lineTable.conversions };
+        product.baseUnit = lineTable.baseUnit;
+      } else if (product.baseUnit === lineTable.baseUnit) {
+        product.unitConversions = mergeConversions(product.unitConversions, lineTable.conversions);
+      }
+      return viaLine;
+    }
+  }
 
   // Fallback: a line invoiced in a base measure (kg / g / l / ml / each) with a price is
   // comparable on that unit by itself. No pack size is required, and the product name is
@@ -195,9 +231,9 @@ export function recalculateProductStats(product: MasterProduct): void {
   if (last.unit) product.standardUnit = last.unit;
   product.lastPurchaseDate = last.date || product.lastPurchaseDate;
 
-  const lastBase = basePriceFor(product, last.unitPrice, last.unit);
+  const lastBase = basePriceFor(product, last.unitPrice, last.unit, last.packSize);
   const comparable: { raw: number; converted: number | null; base: number | null }[] = history.map((h) => {
-    const base = basePriceFor(product, h.unitPrice, h.unit);
+    const base = basePriceFor(product, h.unitPrice, h.unit, h.packSize);
     const converted =
       lastBase != null && base != null ? priceInUnit(product, base, last.unit) : null;
     return { raw: h.unitPrice, converted, base };
@@ -316,7 +352,8 @@ export function rebuildHistoryFromInvoices(
       unitPrice: e.unitPrice,
       invoiceNumber: e.invoiceNumber,
       unit,
-      baseUnitPrice: basePriceFor(product, e.unitPrice, unit),
+      packSize: e.packSize ?? undefined,
+      baseUnitPrice: basePriceFor(product, e.unitPrice, unit, e.packSize),
     };
   });
 

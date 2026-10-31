@@ -467,6 +467,12 @@ export interface MasterProduct {
     invoiceNumber: string;
     /** The unit the price was invoiced in. Needed to convert history back to a base price. */
     unit?: string;
+    /**
+     * The pack printed on the invoice this entry came from. Kept because the product's own
+     * conversion table can be missing the unit, and one readable pack string is all a
+     * conversion needs.
+     */
+    packSize?: string | null;
     /** The same price expressed per base unit, when the conversion is known. */
     baseUnitPrice?: number | null;
   }[];
