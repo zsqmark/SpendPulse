@@ -375,7 +375,19 @@ export function revalidateActiveAlerts(): {
     if (isContaminatedBaseline(product, alert)) {
       doomed.add(alert.id);
       baseline += 1;
+      continue;
     }
+
+    // The comparison has just been re-run with today's rules, so this is the moment to
+    // record what it decided. Alerts raised before the per-base pair existed carry no
+    // such record, and once their invoice is deleted there is nothing left to derive it
+    // from - the card would be left quoting only the printed figures. Writing it back
+    // leaves every alert able to speak for itself.
+    db.updateAlert(alert.id, {
+      previousBaseUnitPrice: comparison.previousBaseUnitPrice ?? null,
+      newBaseUnitPrice: comparison.baseUnitPrice ?? null,
+      baseUnit: comparison.baseUnit ?? null,
+    });
   }
 
   const removed = db.pruneAlerts((a) => !doomed.has(a.id));
