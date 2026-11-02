@@ -1,6 +1,16 @@
 import React, { useState } from 'react';
-import { PriceAlert } from '../types/index.ts';
+import { PriceAlert, Invoice, MasterProduct } from '../types/index.ts';
 import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
+import {
+  formatAmount,
+  formatRate,
+  lineForAlert,
+  perBaseFromPrinted,
+  productOf,
+  previousHistoryEntry,
+  ratesForHistory,
+  ratesForLine,
+} from '../lib/priceDisplay.ts';
 import {
   TrendingUp,
   AlertTriangle,
@@ -13,6 +23,12 @@ import {
 
 interface PriceAlertsFeedProps {
   alerts: PriceAlert[];
+  /**
+   * Today's invoices. An alert is matched to its line at render time, so a corrected unit
+   * or price shows up here instead of the frozen copy taken when the alert was raised.
+   */
+  invoices?: Invoice[];
+  products?: MasterProduct[];
   onAcknowledge: (id: string) => void;
   onDispute: (id: string) => void;
   onViewProductTrends: (productId: string) => void;
@@ -22,6 +38,8 @@ interface PriceAlertsFeedProps {
 
 export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
   alerts,
+  invoices = [],
+  products = [],
   onAcknowledge,
   onDispute,
   onViewProductTrends,
@@ -110,6 +128,42 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {filteredAlerts.map((alert) => {
             const isHighSpike = alert.percentChange >= 10;
+
+            // The alert carries its own copy of the price and unit from the day it was
+            // raised, but the line may have been corrected since. Show the line as it
+            // reads now, and keep the printed figure beside it; falling back to the
+            // snapshot only when the invoice or the line is gone.
+            const live = lineForAlert(alert, invoices, products);
+            const product = productOf(alert, products);
+
+            // One figure, quoted the same way in both places: per kg / per L when the pack
+            // hierarchy is known, the printed amount when it is not. The printed side rides
+            // along so the reader can still reconcile it with the invoice.
+            const lineRates = live ? ratesForLine(live.item, live.product) : { printed: null, perBase: null };
+            const printedRate =
+              lineRates.printed ?? formatRate(alert.newPrice, alert.unit || 'each');
+            const newRate =
+              lineRates.perBase ?? perBaseFromPrinted(alert.newPrice, alert.unit, product);
+
+            const previousEntry = previousHistoryEntry(product, alert.invoiceNumber, alert.invoiceDate);
+            const previousRates = ratesForHistory(previousEntry, product);
+            const wasRate = previousRates.perBase ?? previousRates.printed;
+
+            const nowValue = newRate ? Number(newRate.value) : null;
+            const wasValue = wasRate ? Number(wasRate.value) : null;
+            const comparablePair =
+              nowValue != null &&
+              wasValue != null &&
+              Number.isFinite(nowValue) &&
+              Number.isFinite(wasValue) &&
+              wasValue !== 0;
+            const changePct = comparablePair
+              ? ((nowValue as number) - (wasValue as number)) / (wasValue as number) * 100
+              : alert.percentChange;
+            const deltaText = comparablePair
+              ? `$${formatAmount((nowValue as number) - (wasValue as number))}`
+              : `$${formatAmount(alert.deltaAmount)}`;
+
             return (
               <div
                 key={alert.id}
@@ -144,32 +198,44 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
                   <div className="text-right shrink-0">
                     <div className="inline-flex items-center gap-0.5 font-mono text-sm font-bold text-rose-400">
                       <ArrowUpRight className="w-4 h-4" />
-                      <span>+{alert.percentChange.toFixed(1)}%</span>
+                      <span>+{changePct.toFixed(1)}%</span>
                     </div>
                     <p className="text-[11px] font-mono text-slate-400">
-                      +${alert.deltaAmount.toFixed(2)} / {alert.unit}
+                      +{deltaText} / {newRate?.unit ?? alert.unit}
                     </p>
                   </div>
                 </div>
 
-                {/* Price Baseline Comparison */}
+                {/* Price Baseline Comparison - the same figures the line detail panel shows. */}
                 <div className="mt-3.5 p-2.5 rounded-lg bg-slate-950/60 border border-slate-850 flex items-center justify-between text-xs font-mono">
                   <div>
-                    <span className="text-slate-500 block text-[10px] uppercase tracking-wider">Previous Price</span>
-                    <span className="text-slate-300 font-semibold tabular-nums">
-                      ${alert.previousPrice.toFixed(2)}
+                    <span className="text-slate-500 block text-[10px] uppercase tracking-wider">
+                      {wasRate ? `Was per ${wasRate.unit}` : 'Previous Price'}
                     </span>
-                    <span className="text-slate-500 text-[11px]"> /{alert.unit}</span>
+                    <span className="text-slate-300 font-semibold tabular-nums">
+                      {wasRate?.text ?? '—'}
+                    </span>
+                    {wasRate && previousRates.printed && wasRate.unit !== previousRates.printed.unit ? (
+                      <span className="block text-[10px] font-normal text-slate-500">
+                        printed {previousRates.printed.text}
+                      </span>
+                    ) : null}
                   </div>
 
                   <div className="text-slate-600 text-sm">→</div>
 
                   <div>
-                    <span className="text-slate-500 block text-[10px] uppercase tracking-wider">New Invoiced Price</span>
-                    <span className="text-rose-300 font-bold tabular-nums">
-                      ${alert.newPrice.toFixed(2)}
+                    <span className="text-slate-500 block text-[10px] uppercase tracking-wider">
+                      {newRate ? `Now per ${newRate.unit}` : 'New Invoiced Price'}
                     </span>
-                    <span className="text-slate-500 text-[11px]"> /{alert.unit}</span>
+                    <span className="text-rose-300 font-bold tabular-nums">
+                      {newRate?.text ?? printedRate?.text ?? '—'}
+                    </span>
+                    {newRate && printedRate && newRate.unit !== printedRate.unit ? (
+                      <span className="block text-[10px] font-normal text-slate-500">
+                        printed {printedRate.text}
+                      </span>
+                    ) : null}
                   </div>
 
                   <div className="text-right">

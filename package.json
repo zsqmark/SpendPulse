@@ -14,7 +14,8 @@
     "test:units": "tsx scripts/test-pack-units.ts",
     "test:jump": "tsx scripts/test-invoice-focus.ts",
     "test:category": "tsx scripts/test-category.ts",
-    "test:return": "tsx scripts/test-view-return.ts"
+    "test:return": "tsx scripts/test-view-return.ts",
+    "test:price": "tsx scripts/test-price-display.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

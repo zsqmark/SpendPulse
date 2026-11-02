@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useSyncExternalStore } from 'react';
 import { Header } from './components/Header.tsx';
 import { InvoicesView } from './components/InvoicesView.tsx';
 import { PriceAlertsFeed } from './components/PriceAlertsFeed.tsx';
@@ -35,6 +35,11 @@ import {
   type ReturnOrigin,
   type CloseReason,
 } from './lib/viewReturn.ts';
+import {
+  subscribeToCatalog,
+  getCatalogSnapshot,
+  publishCatalog,
+} from './lib/catalogStore.ts';
 import type {
   UnitChangeApi,
   UnitChangeContext,
@@ -55,13 +60,25 @@ import {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<HeaderTab>('invoices');
-  /** Alignments waiting on the owner. Drives the badge in the header. */
-  const [alignmentConflicts, setAlignmentConflicts] = useState(0);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [masterProducts, setMasterProducts] = useState<MasterProduct[]>([]);
-  const [alerts, setAlerts] = useState<PriceAlert[]>([]);
-  const [vendors, setVendors] = useState<VendorSummary[]>([]);
-  const [stats, setStats] = useState<DashboardStats | null>(null);
+
+  /**
+   * Everything the app shows, from one source.
+   *
+   * A correction to a line - a unit, a pack size, a price - changes the numbers in four
+   * places at once (the alert, the line detail, the trends curve and the catalogue card).
+   * They are all rendered from this snapshot, so one refresh moves all of them together
+   * instead of leaving the alert describing a line that no longer reads that way.
+   */
+  const catalog = useSyncExternalStore(subscribeToCatalog, getCatalogSnapshot);
+  const {
+    invoices,
+    products: masterProducts,
+    alerts,
+    vendors,
+    stats,
+    alignmentConflicts,
+    loading: isLoading,
+  } = catalog;
 
   const [isFolderMonitorOpen, setIsFolderMonitorOpen] = useState(false);
   const [isScanModalOpen, setIsScanModalOpen] = useState(false);
@@ -69,7 +86,6 @@ export default function App() {
   const [selectedTrendProductId, setSelectedTrendProductId] = useState<string | undefined>(undefined);
   /** Where an invoice-number link wants the Invoices view to land. */
   const [focusTarget, setFocusTarget] = useState<InvoiceFocusTarget | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
 
   /**
    * The way back.
@@ -150,16 +166,19 @@ export default function App() {
         safeJson('/api/alignment/review'),
       ]);
 
-      setInvoices(Array.isArray(invRes) ? invRes : []);
-      setMasterProducts(Array.isArray(catRes) ? catRes : []);
-      setAlerts(Array.isArray(alertRes) ? alertRes : []);
-      setStats(statsRes ?? null);
-      setVendors(Array.isArray(vendorRes) ? vendorRes : []);
-      setAlignmentConflicts(alignRes?.total ?? 0);
+      // One publish, so no screen can hold new invoices beside stale alerts.
+      publishCatalog({
+        invoices: Array.isArray(invRes) ? invRes : [],
+        products: Array.isArray(catRes) ? catRes : [],
+        alerts: Array.isArray(alertRes) ? alertRes : [],
+        stats: statsRes ?? null,
+        vendors: Array.isArray(vendorRes) ? vendorRes : [],
+        alignmentConflicts: alignRes?.total ?? 0,
+        loading: false,
+      });
     } catch (err) {
       console.error('Failed to load initial data:', err);
-    } finally {
-      setIsLoading(false);
+      publishCatalog({ loading: false });
     }
   };
 
@@ -167,13 +186,20 @@ export default function App() {
     loadData();
   }, []);
 
+  /** Moves one alert to a new status and republishes - the only way a status changes. */
+  const patchAlert = (id: string, status: PriceAlert['status']) => {
+    publishCatalog({
+      alerts: catalog.alerts.map((a) => (a.id === id ? { ...a, status } : a)),
+    });
+  };
+
   const handleAcknowledgeAlert = async (id: string) => {
     try {
       const res = await fetch(apiUrl(`/api/alerts/${id}/acknowledge`), { method: 'POST' });
       if (res.ok) {
-        setAlerts((prev) =>
-          prev.map((a) => (a.id === id ? { ...a, status: 'acknowledged' } : a))
-        );
+        // Optimistic, through the same store, so the feed and the detail panel agree
+        // immediately and again once the reload lands.
+        patchAlert(id, 'acknowledged');
         loadData();
       }
     } catch (err) {
@@ -185,9 +211,7 @@ export default function App() {
     try {
       const res = await fetch(apiUrl(`/api/alerts/${id}/dispute`), { method: 'POST' });
       if (res.ok) {
-        setAlerts((prev) =>
-          prev.map((a) => (a.id === id ? { ...a, status: 'disputed' } : a))
-        );
+        patchAlert(id, 'disputed');
         loadData();
       }
     } catch (err) {
@@ -696,6 +720,8 @@ export default function App() {
               <div style={tabStyle('alerts')}>
               <PriceAlertsFeed
                 alerts={alerts}
+                invoices={invoices}
+                products={masterProducts}
                 onAcknowledge={handleAcknowledgeAlert}
                 onDispute={handleDisputeAlert}
                 onViewProductTrends={handleViewProductTrends}

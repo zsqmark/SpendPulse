@@ -4,6 +4,8 @@
  * pick the right level instead of typing a spelling the matcher has never seen.
  */
 
+import { formatRate, normaliseUnitLabel } from './priceDisplay.ts';
+
 export interface UnitOption {
   value: string;
   label: string;
@@ -29,13 +31,13 @@ export const UNIT_OPTIONS: UnitOption[] = [
   { value: 'each', label: 'each / ea', level: 'each' },
 ];
 
-/** How a base measure is written on screen. */
+/**
+ * How a base measure is written on screen.
+ *
+ * Delegates to priceDisplay.ts so one table decides the spelling.
+ */
 export function formatBaseUnit(baseUnit?: string | null): string {
-  if (!baseUnit) return '';
-  if (baseUnit === 'l') return 'L';
-  if (baseUnit === 'ml') return 'mL';
-  if (baseUnit === 'each') return 'ea';
-  return baseUnit;
+  return normaliseUnitLabel(baseUnit);
 }
 
 const WEIGHT_IN_KG: Record<string, number> = { kg: 1, g: 0.001, lb: 0.453592 };
@@ -129,15 +131,13 @@ export function describePackHierarchy(
   return null;
 }
 
-/** "$1.20/kg" - the price every comparison is actually made on. */
+/**
+ * "$1.20/kg" - the price every comparison is actually made on.
+ *
+ * The formatting lives in priceDisplay.ts now, so the alert feed, the line detail panel and
+ * the catalogue all spell a rate the same way. Kept here under its old name because a dozen
+ * places already call it.
+ */
 export function formatBasePrice(baseUnitPrice?: number | null, baseUnit?: string | null): string {
-  if (baseUnitPrice == null || !Number.isFinite(baseUnitPrice) || !baseUnit) return '';
-  const unit = formatBaseUnit(baseUnit);
-  const value =
-    baseUnitPrice >= 1
-      ? baseUnitPrice.toFixed(2)
-      : baseUnitPrice >= 0.1
-        ? baseUnitPrice.toFixed(3)
-        : baseUnitPrice.toFixed(4);
-  return `$${value}/${unit}`;
+  return formatRate(baseUnitPrice, baseUnit)?.text ?? '';
 }

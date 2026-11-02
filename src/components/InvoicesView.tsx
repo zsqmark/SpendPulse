@@ -38,6 +38,7 @@ import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
 import { describeNotComparable } from '../lib/comparisonReason.ts';
 import { describeFieldAlignment } from '../lib/alignmentLabels.ts';
 import type { ReturnOrigin, CloseReason } from '../lib/viewReturn.ts';
+import { normaliseUnitLabel, printedRateOf } from '../lib/priceDisplay.ts';
 import type {
   InvoiceFocusTarget,
   LineAlignment,
@@ -956,7 +957,9 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                                     Pack: {item.packSize}
                                   </span>
                                 )}
-                                <span className="text-slate-500">Unit: {item.unit}</span>
+                                <span className="text-slate-500">
+                                  Unit: {normaliseUnitLabel(item.unit)}
+                                </span>
                                 <AlignmentBadge alignment={item.alignment} />
                               </div>
                               {/* The whole point of the pack hierarchy: what this line
@@ -1024,7 +1027,7 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                             </td>
 
                             <td className="py-2.5 px-3 font-mono text-right text-slate-200 tabular-nums">
-                              ${item.unitPrice.toFixed(2)}
+                              {printedRateOf(item)?.text ?? '—'}
                               {item.standardUnitPrice != null && item.standardUnit ? (
                                 <div
                                   className="text-[10px] text-slate-500 tabular-nums"
