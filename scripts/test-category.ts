@@ -97,6 +97,33 @@ check(
   shelves.every(([, expected]) => (CATEGORY_OPTIONS as readonly string[]).includes(expected))
 );
 
+// The seafood keyword list sits ahead of the dry-goods one, so a product NAMED after a
+// seafood but made of spice used to be filed as Seafood. `recategorize --apply` would have
+// moved this curry powder there.
+const namedAfterSeafood: Array<[string, string]> = [
+  ["BABA'S FISH CURRY PWD 40*250G", 'Dry Goods'],
+  ['FISH SAUCE 12*700ML', 'Dry Goods'],
+  ['SHRIMP PASTE 20*500G', 'Dry Goods'],
+  ['PRAWN STOCK POWDER 1KG', 'Dry Goods'],
+];
+
+for (const [name, expected] of namedAfterSeafood) {
+  const actual = guessCategory(name);
+  check(`${name} -> ${expected}`, actual === expected, `got ${actual}`);
+}
+
+// Real seafood must still land on the seafood shelf.
+const realSeafood: Array<[string, string]> = [
+  ['FISH FILLET 2KG', 'Seafood'],
+  ['PRAWN 500G', 'Seafood'],
+  ['SQUID 1KG', 'Seafood'],
+];
+
+for (const [name, expected] of realSeafood) {
+  const actual = guessCategory(name);
+  check(`${name} -> ${expected}`, actual === expected, `got ${actual}`);
+}
+
 // ------------------------------------------------------------ the owner's override
 console.log('\n3. A category the owner set outranks the guess');
 

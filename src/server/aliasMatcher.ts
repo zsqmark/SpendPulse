@@ -203,8 +203,11 @@ export function isNonProductLine(rawDescription: string): boolean {
 // Meat detection lives in src/lib/meatPricing.ts so the browser can use the very same
 // rule - two copies of the keyword list would drift apart.
 export { MEAT_CATEGORY } from '../lib/meatPricing.ts';
-import { isMeatDescription, MEAT_CATEGORY } from '../lib/meatPricing.ts';
+import { isMeatDescription, MEAT_CATEGORY, NON_MEAT_PATTERN } from '../lib/meatPricing.ts';
 import { DEFAULT_CATEGORY } from '../lib/categories.ts';
+
+/** Named here because the category test below has to recognise it by name. */
+const SEAFOOD_CATEGORY = 'Seafood';
 
 /**
  * Words that place a line in a category, tried in this order.
@@ -215,7 +218,7 @@ import { DEFAULT_CATEGORY } from '../lib/categories.ts';
  * be able to say "no" before the hints below get their turn.
  */
 const CATEGORY_HINTS: Array<[RegExp, string]> = [
-  [/\b(fish|salmon|prawn|shrimp|seafood|squid|crab|tuna|oyster|mussel|scallop)\b/i, 'Seafood'],
+  [/\b(fish|salmon|prawn|shrimp|seafood|squid|crab|tuna|oyster|mussel|scallop)\b/i, SEAFOOD_CATEGORY],
   [/\b(milk|cream|butter|cheese|yoghurt|yogurt|egg|dairy)\b/i, 'Dairy & Eggs'],
   [
     /\b(flour|sugar|rice|pasta|noodle|oil|salt|spice|curry|powder|seasoning|paste|stock|sauce|vinegar|baking|yeast|herb|cereal|bean|lentil|gelatine|gelatin|colouring|flavouring)\b/i,
@@ -233,6 +236,10 @@ const CATEGORY_HINTS: Array<[RegExp, string]> = [
 export function guessCategory(rawDescription: string): string {
   if (isMeatDescription(rawDescription)) return MEAT_CATEGORY;
   for (const [pattern, category] of CATEGORY_HINTS) {
+    // Seafood takes the same veto meat does. `FISH CURRY PWD` and `PRAWN FLAVOUR CRACKER`
+    // name a seafood but ARE not one - a curry powder is a spice - so a seafood keyword only
+    // settles the category when nothing plant-like or spicy is named alongside it.
+    if (category === SEAFOOD_CATEGORY && NON_MEAT_PATTERN.test(rawDescription)) continue;
     if (pattern.test(rawDescription)) return category;
   }
   return DEFAULT_CATEGORY;
