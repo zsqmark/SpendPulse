@@ -2,14 +2,10 @@ import React, { useState } from 'react';
 import { PriceAlert, Invoice, MasterProduct } from '../types/index.ts';
 import { InvoiceJumpLink, type InvoiceJumpRequest } from './InvoiceJumpLink.tsx';
 import {
+  alertRates,
+  changeBetween,
   formatAmount,
-  formatRate,
-  lineForAlert,
-  perBaseFromPrinted,
-  productOf,
-  previousHistoryEntry,
-  ratesForHistory,
-  ratesForLine,
+  normaliseUnitLabel,
 } from '../lib/priceDisplay.ts';
 import {
   TrendingUp,
@@ -127,42 +123,17 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {filteredAlerts.map((alert) => {
-            const isHighSpike = alert.percentChange >= 10;
-
-            // The alert carries its own copy of the price and unit from the day it was
-            // raised, but the line may have been corrected since. Show the line as it
-            // reads now, and keep the printed figure beside it; falling back to the
-            // snapshot only when the invoice or the line is gone.
-            const live = lineForAlert(alert, invoices, products);
-            const product = productOf(alert, products);
-
-            // One figure, quoted the same way in both places: per kg / per L when the pack
-            // hierarchy is known, the printed amount when it is not. The printed side rides
-            // along so the reader can still reconcile it with the invoice.
-            const lineRates = live ? ratesForLine(live.item, live.product) : { printed: null, perBase: null };
-            const printedRate =
-              lineRates.printed ?? formatRate(alert.newPrice, alert.unit || 'each');
-            const newRate =
-              lineRates.perBase ?? perBaseFromPrinted(alert.newPrice, alert.unit, product);
-
-            const previousEntry = previousHistoryEntry(product, alert.invoiceNumber, alert.invoiceDate);
-            const previousRates = ratesForHistory(previousEntry, product);
-            const wasRate = previousRates.perBase ?? previousRates.printed;
-
-            const nowValue = newRate ? Number(newRate.value) : null;
-            const wasValue = wasRate ? Number(wasRate.value) : null;
-            const comparablePair =
-              nowValue != null &&
-              wasValue != null &&
-              Number.isFinite(nowValue) &&
-              Number.isFinite(wasValue) &&
-              wasValue !== 0;
-            const changePct = comparablePair
-              ? ((nowValue as number) - (wasValue as number)) / (wasValue as number) * 100
-              : alert.percentChange;
-            const deltaText = comparablePair
-              ? `$${formatAmount((nowValue as number) - (wasValue as number))}`
-              : `$${formatAmount(alert.deltaAmount)}`;
+            // Both figures come from one place, per base unit - the basis the increase
+            // was judged on. The live line wins so a correction shows up immediately.
+            const rates = alertRates(alert, invoices, products);
+            const { printed: printedRate, was: wasRate, now: newRate } = rates;
+            const change = changeBetween(wasRate, newRate, {
+              percent: alert.percentChange,
+              delta: alert.deltaAmount,
+            });
+            const changePct = change.percent ?? alert.percentChange ?? null;
+            const changeDelta = change.delta ?? alert.deltaAmount ?? null;
+            const isHighSpike = (changePct ?? 0) >= 10;
 
             return (
               <div
@@ -194,15 +165,22 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
                     </h3>
                   </div>
 
-                  {/* Percentage Spike Tag */}
+                  {/* Percentage Spike Tag - the movement between the two per-base figures.
+                      Left out entirely when no shared basis could be found: a number
+                      invented from two different measures would be worse than none. */}
                   <div className="text-right shrink-0">
-                    <div className="inline-flex items-center gap-0.5 font-mono text-sm font-bold text-rose-400">
-                      <ArrowUpRight className="w-4 h-4" />
-                      <span>+{changePct.toFixed(1)}%</span>
-                    </div>
-                    <p className="text-[11px] font-mono text-slate-400">
-                      +{deltaText} / {newRate?.unit ?? alert.unit}
-                    </p>
+                    {changePct != null ? (
+                      <div className="inline-flex items-center gap-0.5 font-mono text-sm font-bold text-rose-400">
+                        <ArrowUpRight className="w-4 h-4" />
+                        <span>+{changePct.toFixed(1)}%</span>
+                      </div>
+                    ) : null}
+                    {changeDelta != null ? (
+                      <p className="text-[11px] font-mono text-slate-400">
+                        +${formatAmount(changeDelta)} /{' '}
+                        {newRate?.unit ?? normaliseUnitLabel(alert.unit)}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
 
@@ -215,11 +193,6 @@ export const PriceAlertsFeed: React.FC<PriceAlertsFeedProps> = ({
                     <span className="text-slate-300 font-semibold tabular-nums">
                       {wasRate?.text ?? '—'}
                     </span>
-                    {wasRate && previousRates.printed && wasRate.unit !== previousRates.printed.unit ? (
-                      <span className="block text-[10px] font-normal text-slate-500">
-                        printed {previousRates.printed.text}
-                      </span>
-                    ) : null}
                   </div>
 
                   <div className="text-slate-600 text-sm">→</div>

@@ -2261,6 +2261,9 @@ app.put('/api/invoices/:invoiceId/items/:itemId', (req, res) => {
           detectedAt: new Date().toISOString(),
           status: 'active',
           unit: item.unit,
+          previousBaseUnitPrice: comparison.previousBaseUnitPrice ?? null,
+          newBaseUnitPrice: comparison.baseUnitPrice ?? null,
+          baseUnit: comparison.baseUnit ?? null,
         };
         db.addAlert(alert);
         alertCreated = alert;
@@ -2534,6 +2537,9 @@ app.post('/api/catalog/rebuild-price-history', (req, res) => {
           detectedAt: new Date().toISOString(),
           status: 'active',
           unit: after.unit || product.standardUnit,
+          previousBaseUnitPrice: cmp.previousBaseUnitPrice ?? null,
+          newBaseUnitPrice: cmp.baseUnitPrice ?? null,
+          baseUnit: cmp.baseUnit ?? null,
         };
         db.addAlert(alert);
         alertsCreated.push(alert);

@@ -547,6 +547,17 @@ export interface PriceAlert {
   detectedAt: string;
   status: 'active' | 'acknowledged' | 'disputed';
   unit: string;
+  /**
+   * The same move expressed per base unit - the figures the alert was decided on.
+   *
+   * `previousPrice` / `newPrice` are what the invoice printed; these are what the alert
+   * compared. The UI quotes these and keeps the printed pair beside them, so the alert
+   * feed and the line detail panel always say the same thing. Null when the pack
+   * hierarchy was unreadable, in which case comparable is false and no move is claimed.
+   */
+  previousBaseUnitPrice?: number | null;
+  newBaseUnitPrice?: number | null;
+  baseUnit?: string | null;
 }
 
 export interface ChatMessage {

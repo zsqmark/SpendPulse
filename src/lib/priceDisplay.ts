@@ -291,3 +291,129 @@ export function lineForAlert(
 
   return { item, product };
 }
+
+/** An alert, in the shape the API returns it. */
+export interface AlertLike {
+  masterProductId?: string;
+  invoiceId?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  unit?: string | null;
+  previousPrice?: number | null;
+  newPrice?: number | null;
+  deltaAmount?: number | null;
+  percentChange?: number | null;
+  /** The per-base pair the increase was decided on, when the alert recorded it. */
+  previousBaseUnitPrice?: number | null;
+  newBaseUnitPrice?: number | null;
+  baseUnit?: string | null;
+}
+
+/** The two figures an alert is about, plus what the invoice physically printed. */
+export interface AlertRates {
+  /** The new price as invoiced, in the unit printed on the line. */
+  printed: RateDisplay | null;
+  /** The earlier price, quoted per base unit. */
+  was: RateDisplay | null;
+  /** The new price, quoted per base unit - the figure that was judged. */
+  now: RateDisplay | null;
+}
+
+/**
+ * The two figures an alert stands for, both on the same basis.
+ *
+ * The alert carries a snapshot taken when it was raised, but a line can be corrected
+ * afterwards - and a corrected unit must show up here straight away. So the live line wins,
+ * then the pair the alert recorded, then the printed prices converted with today's pack table.
+ * Whatever the route, `was` and `now` come back per base unit, which is the basis the increase
+ * was decided on - so the percentage shown is the percentage that was judged.
+ */
+export function alertRates(
+  alert: AlertLike,
+  invoices: Invoice[] = [],
+  products: MasterProduct[] = []
+): AlertRates {
+  const product = productOf(alert, products);
+  const live = lineForAlert(alert, invoices, products);
+
+  const lineRates = live
+    ? ratesForLine(live.item, live.product)
+    : { printed: null, perBase: null };
+
+  const printed =
+    lineRates.printed ?? formatRate(alert.newPrice, alert.unit || 'each');
+
+  const now =
+    lineRates.perBase ??
+    formatRate(alert.newBaseUnitPrice, alert.baseUnit ?? product?.baseUnit ?? null) ??
+    perBaseFromPrinted(alert.newPrice, alert.unit, product);
+
+  const recordedWas =
+    alert.previousBaseUnitPrice != null && Number.isFinite(alert.previousBaseUnitPrice)
+      ? formatRate(
+          alert.previousBaseUnitPrice,
+          alert.baseUnit ?? product?.baseUnit ?? null
+        )
+      : null;
+
+  const previousEntry = previousHistoryEntry(product, alert.invoiceNumber, alert.invoiceDate);
+  const previousRates = ratesForHistory(previousEntry, product);
+
+  // Live first: the line as it reads now. Then what the alert was decided on. Then the
+  // printed figure put on the same basis.
+  const was =
+    previousRates.perBase ??
+    recordedWas ??
+    previousRates.printed ??
+    perBaseFromPrinted(alert.previousPrice, alert.unit, product);
+
+  return { printed, was, now };
+}
+
+/** The movement between two figures, when they can be put on one basis. */
+export interface RateChange {
+  /** Whole percent, e.g. 12.5 for +12.5%. Null when the two cannot be compared. */
+  percent: number | null;
+  /** Money difference in the shared unit. Null when the two cannot be compared. */
+  delta: number | null;
+  /** False when the two figures are not on one basis - the UI must say so. */
+  comparable: boolean;
+}
+
+/**
+ * The movement between the two figures an alert shows.
+ *
+ * Returns nulls rather than a wrong number: if one side is missing, or the two ended up in
+ * different measures, there is no honest percentage to print. `fallback` carries the figure
+ * recorded when the alert was raised, used only when today's data cannot produce one.
+ */
+export function changeBetween(
+  was?: RateDisplay | null,
+  now?: RateDisplay | null,
+  fallback?: { percent?: number | null; delta?: number | null }
+): RateChange {
+  const from = was ? Number(was.value) : NaN;
+  const to = now ? Number(now.value) : NaN;
+  const sameMeasure = Boolean(was && now) && canonicalUnit(was!.unit) === canonicalUnit(now!.unit);
+
+  if (
+    !sameMeasure ||
+    !Number.isFinite(from) ||
+    !Number.isFinite(to) ||
+    from <= 0
+  ) {
+    const percent = fallback?.percent;
+    const delta = fallback?.delta;
+    return {
+      percent: percent == null || !Number.isFinite(percent) ? null : percent,
+      delta: delta == null || !Number.isFinite(delta) ? null : delta,
+      comparable: false,
+    };
+  }
+
+  return {
+    percent: ((to - from) / from) * 100,
+    delta: to - from,
+    comparable: true,
+  };
+}

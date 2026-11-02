@@ -78,10 +78,23 @@ function lastEntryBefore(
 }
 
 export interface PriceComparison {
+  /**
+   * The two prices as the invoice printed them, in the unit this line was invoiced in.
+   * Kept because this is the money the accounts close against.
+   */
   previousPrice: number | null;
   deltaAmount: number | null;
   percentChange: number | null;
+  /** The incoming price per base unit - what the line and the catalogue quote. */
   baseUnitPrice: number | null;
+  /**
+   * The previous price per base unit. Together with `baseUnitPrice` this is the PAIR the
+   * increase decision was made on; both are copied onto any alert raised, so the alert
+   * can never quote different numbers from the ones that were judged. Null when the pack
+   * hierarchy is unknown, in which case `comparable` is false and nothing is claimed.
+   */
+  previousBaseUnitPrice?: number | null;
+  /** The base measure behind the pair above ("kg" / "L" / "each"). */
   baseUnit: string | null;
   comparable: boolean;
   /** Which rule blocked the comparison. Null once the two prices WERE compared. */
@@ -218,6 +231,7 @@ export function compareAgainstHistory(
       ? +(((unitPrice - prior.unitPrice) / prior.unitPrice) * 100).toFixed(2)
       : 0;
     base.isIncrease = false;
+    base.previousBaseUnitPrice = prevBase;
     base.notComparableCode = null;
     base.notComparableReason = null;
     return base;
@@ -240,6 +254,7 @@ export function compareAgainstHistory(
     // Both convertible - compare per base unit, then show the old price in the new unit
     // so the two numbers on screen can be compared by eye.
     base.comparable = true;
+    base.previousBaseUnitPrice = prevBase;
     previousShown = priceInUnit(product, prevBase, unit) ?? prior.unitPrice;
     increase = isRealIncrease(prevBase, incomingBase);
 
@@ -531,6 +546,11 @@ export function checkAndRecordPriceChange(params: {
       detectedAt: new Date().toISOString(),
       status: 'active',
       unit: unit || product.standardUnit,
+      // What the decision was made on, so the alert and the line detail panel can never
+      // quote different numbers for one move.
+      previousBaseUnitPrice: comparison.previousBaseUnitPrice ?? null,
+      newBaseUnitPrice: comparison.baseUnitPrice ?? null,
+      baseUnit: comparison.baseUnit ?? null,
     };
     db.addAlert(alert);
     result.hasPriceIncrease = true;

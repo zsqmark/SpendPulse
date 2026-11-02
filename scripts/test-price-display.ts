@@ -11,7 +11,9 @@
  */
 
 import {
+  alertRates,
   canonicalUnit,
+  changeBetween,
   formatAmount,
   formatRate,
   lineForAlert,
@@ -204,6 +206,64 @@ check(
   'a price in a unit the product does not know is left unconverted',
   unknown === null || unknown.unit !== 'carton'
 );
+
+console.log('\nThe alert shows the pair it was judged on');
+
+const recorded: PriceAlert = {
+  ...alert,
+  previousBaseUnitPrice: 3.2,
+  newBaseUnitPrice: 3.1,
+  baseUnit: 'kg',
+} as PriceAlert;
+
+const withLine = alertRates(recorded, [invoice], [rice]);
+// The live line carries baseUnitPrice 3.1, so both sides land on /kg.
+check('the new price is quoted per base unit', withLine.now?.unit === 'kg', String(withLine.now?.unit));
+check('the earlier price is quoted per base unit', withLine.was?.unit === 'kg', String(withLine.was?.unit));
+check('the printed figure rides along', withLine.printed?.text === '$62.00/bag', String(withLine.printed?.text));
+
+const noLine = alertRates(recorded, [], [rice]);
+check(
+  'without a line the alert falls back to the pair it recorded',
+  noLine.now?.text === '$3.10/kg' && noLine.was?.text === '$3.20/kg',
+  `${noLine.now?.text} / ${noLine.was?.text}`
+);
+
+const legacy = alertRates(alert, [], [rice]);
+check(
+  'an alert raised before the pair was stored still resolves',
+  legacy.now?.unit === 'kg' && legacy.was?.unit === 'kg',
+  `${legacy.now?.unit} / ${legacy.was?.unit}`
+);
+
+check(
+  'an alert whose product is gone shows no invented figure',
+  alertRates(alert, [], []).was === null
+);
+
+console.log('\nThe movement is measured on the shared basis');
+
+const up = changeBetween({ value: '3.20', unit: 'kg', text: '$3.20/kg' }, { value: '3.52', unit: 'kg', text: '$3.52/kg' });
+check('a rise reads as a rise', up.comparable && Math.abs((up.percent ?? 0) - 10) < 0.01, String(up.percent));
+check('the money difference follows', up.delta != null && Math.abs(up.delta - 0.32) < 0.005, String(up.delta));
+
+const down = changeBetween({ value: '3.20', unit: 'kg', text: '$3.20/kg' }, { value: '3.10', unit: 'kg', text: '$3.10/kg' });
+check('a fall reads as a fall', down.comparable && (down.percent ?? 0) < 0, String(down.percent));
+
+const mixed = changeBetween({ value: '1.85', unit: 'each', text: '$1.85/ea' }, { value: '3.10', unit: 'kg', text: '$3.10/kg' });
+check('two different measures produce no percentage', mixed.comparable === false && mixed.percent === null);
+
+const halfMissing = changeBetween(null, { value: '3.10', unit: 'kg', text: '$3.10/kg' });
+check('a missing side produces no percentage', halfMissing.percent === null);
+
+const fallsBack = changeBetween(null, null, { percent: 4.5, delta: 0.9 });
+check(
+  'the figure recorded when the alert was raised is used as a last resort',
+  fallsBack.percent === 4.5 && fallsBack.delta === 0.9 && fallsBack.comparable === false
+);
+
+const brokenFallback = changeBetween(null, null, { percent: Number.NaN, delta: null });
+check('a broken fallback is never printed', brokenFallback.percent === null && brokenFallback.delta === null);
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed > 0) process.exit(1);
