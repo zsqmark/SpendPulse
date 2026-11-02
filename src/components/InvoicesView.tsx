@@ -3,6 +3,7 @@ import { Invoice, InvoiceItem } from '../types/index.ts';
 import { apiUrl } from '../lib/apiBase.ts';
 import { lineDomId, resolveInvoiceJump } from '../lib/invoiceFocus.ts';
 import {
+  ArrowLeft,
   FileText,
   Search,
   Filter,
@@ -36,6 +37,7 @@ import {
 import { formatLineMeasure, isMeatLine } from '../lib/meatPricing.ts';
 import { describeNotComparable } from '../lib/comparisonReason.ts';
 import { describeFieldAlignment } from '../lib/alignmentLabels.ts';
+import type { ReturnOrigin, CloseReason } from '../lib/viewReturn.ts';
 import type {
   InvoiceFocusTarget,
   LineAlignment,
@@ -64,6 +66,19 @@ interface InvoicesViewProps {
     itemId: string,
     patch: LineItemPatch
   ) => Promise<LineItemUpdateResult | null>;
+  /**
+   * The tab the reader came from, when the inspector was opened by a jump.
+   *
+   * Absent when they opened the invoice themselves from the invoices tab, and after a
+   * refresh or a shared link - in which case closing has nowhere to send them.
+   */
+  returnOrigin?: ReturnOrigin | null;
+  /**
+   * Closes the inspector and, when the job is done, hands the reader back to the page
+   * the jump came from. `reason` separates "I am done, take me back" from "get out of
+   * the way, I am still on this page".
+   */
+  onFinishTask?: (reason: CloseReason) => void;
 }
 
 /**
@@ -139,6 +154,8 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
   onUpdateLineItem,
   focusTarget,
   onFocusHandled,
+  returnOrigin = null,
+  onFinishTask,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [vendorFilter, setVendorFilter] = useState('all');
@@ -257,10 +274,19 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
     if (fresh && fresh !== selectedInvoice) setSelectedInvoice(fresh);
   }, [invoices]);
 
-  const closeInspector = () => {
+  /**
+   * Closing the inspector.
+   *
+   * The default is 'complete': the reader came here to see or fix a line, they have done
+   * that, and closing should take them back to the page the jump started from. 'cancel' is
+   * Escape, the backdrop or a cancel button - they are not finished with this page yet, so
+   * the inspector closes and nothing else moves.
+   */
+  const closeInspector = (reason: CloseReason = 'complete') => {
     setSelectedInvoice(null);
     setEditingItemId(null);
     setSaveNote(null);
+    onFinishTask?.(reason);
   };
 
   /**
@@ -277,6 +303,28 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
     if (wanted && pages.some((p) => p.pageNumber === wanted)) return wanted;
     return pages[0].pageNumber;
   };
+
+  /**
+   * Escape closes the inspector - but only as a cancel, never as a way back.
+   *
+   * While a line is being edited, Escape leaves the editor instead of closing the panel,
+   * so a slip of the key cannot discard what has been typed.
+   */
+  useEffect(() => {
+    if (!selectedInvoice) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (editingItemId) {
+        setEditingItemId(null);
+        setDraft({});
+        setCustomUnit('');
+        return;
+      }
+      closeInspector('cancel');
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedInvoice, editingItemId]);
 
   /** Clicking any row opens the inspector on the original scan when we archived it. */
   const openInvoice = (inv: Invoice) => {
@@ -611,8 +659,18 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
 
       {/* Invoice Detail Inspector Modal */}
       {selectedInvoice && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-5xl w-full p-6 shadow-2xl relative max-h-[92vh] flex flex-col">
+        <div
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => {
+            // The backdrop is a "get out of my way", not a "take me back": close the panel
+            // and stay put. Unfinished line edits are left alone for the same reason.
+            if (!editingItemId) closeInspector('cancel');
+          }}
+        >
+          <div
+            className="bg-slate-900 border border-slate-800 rounded-xl max-w-5xl w-full p-6 shadow-2xl relative max-h-[92vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
               <div className="flex items-center gap-3">
@@ -635,12 +693,29 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                   </p>
                 </div>
               </div>
-              <button
-                onClick={closeInspector}
-                className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800"
-              >
-                ✕
-              </button>
+              <div className="flex items-center gap-1.5">
+                {returnOrigin && (
+                  <button
+                    onClick={() => closeInspector('complete')}
+                    title={`Finish and go back to ${returnOrigin.label}`}
+                    className="text-xs font-semibold text-blue-300 hover:text-blue-200 px-2.5 py-1.5 rounded-md border border-blue-900/60 bg-blue-950/30 hover:bg-blue-900/40 transition-colors inline-flex items-center gap-1.5"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Back to {returnOrigin.label}</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => closeInspector('complete')}
+                  title={
+                    returnOrigin
+                      ? `Close and go back to ${returnOrigin.label}`
+                      : 'Close'
+                  }
+                  className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
 
             {/* Modal Body */}
@@ -1269,10 +1344,10 @@ export const InvoicesView: React.FC<InvoicesViewProps> = ({
                 Invoice UUID: {selectedInvoice.id}
               </span>
               <button
-                onClick={closeInspector}
+                onClick={() => closeInspector('complete')}
                 className="px-4 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors"
               >
-                Close Inspector
+                {returnOrigin ? `Done · Back to ${returnOrigin.label}` : 'Close Inspector'}
               </button>
             </div>
           </div>

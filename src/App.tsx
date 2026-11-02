@@ -29,6 +29,12 @@ import {
   InvoiceFocusTarget,
 } from './types/index.ts';
 import type { InvoiceJumpRequest } from './components/InvoiceJumpLink.tsx';
+import {
+  buildReturnOrigin,
+  resolveReturnTarget,
+  type ReturnOrigin,
+  type CloseReason,
+} from './lib/viewReturn.ts';
 import type {
   UnitChangeApi,
   UnitChangeContext,
@@ -64,6 +70,67 @@ export default function App() {
   /** Where an invoice-number link wants the Invoices view to land. */
   const [focusTarget, setFocusTarget] = useState<InvoiceFocusTarget | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  /**
+   * The way back.
+   *
+   * A jump that follows an invoice number takes the reader to another tab to do a job. When
+   * the job is finished the close has to put them back on the page they came from - with its
+   * filters, its half-filled form and its scroll position intact - instead of leaving them
+   * on the invoices tab, which is where the app starts and where they never meant to be.
+   *
+   * There is no router here, so the journey is recorded by hand. Nothing is remembered
+   * across a refresh or a shared link, which is the fallback: no origin, no journey, stay
+   * where you are.
+   */
+  const [returnOrigin, setReturnOrigin] = useState<ReturnOrigin | null>(null);
+  /** The origin page stays mounted while the reader is away, so it keeps its own state. */
+  const [keptTab, setKeptTab] = useState<HeaderTab | null>(null);
+  /** A scroll position waiting for the page it belongs to to become visible again. */
+  const [pendingScrollY, setPendingScrollY] = useState<number | null>(null);
+
+  // A page that is shown again must come back where the reader left it. Restored after the
+  // paint, because a hidden tab has no height to scroll until it is laid out.
+  useEffect(() => {
+    if (pendingScrollY == null) return;
+    const y = pendingScrollY;
+    setPendingScrollY(null);
+    requestAnimationFrame(() => window.scrollTo(0, y));
+  }, [activeTab, pendingScrollY]);
+
+  /** Leaving one tab for another: remember the way back, and start the new page at the top. */
+  const goToTab = (tab: HeaderTab) => {
+    if (tab === activeTab) return;
+    setReturnOrigin(buildReturnOrigin(activeTab, tab, returnOrigin, window.scrollY));
+    setKeptTab(activeTab);
+    setActiveTab(tab);
+    setPendingScrollY(0);
+  };
+
+  /** Choosing a tab from the header is a journey of its own: nothing to come back to. */
+  const chooseTab = (tab: HeaderTab) => {
+    if (tab === activeTab) return;
+    setReturnOrigin(null);
+    setKeptTab(null);
+    setActiveTab(tab);
+    setPendingScrollY(0);
+  };
+
+  /**
+   * Called when the inspector is closed.
+   *
+   * 'complete' means the reader finished what the jump was for and wants to go back.
+   * 'cancel' - Escape, the backdrop, a cancel button - means "close this, I am still
+   * working on this page", so nothing moves.
+   */
+  const handleReturnFromTask = (reason: CloseReason = 'complete') => {
+    const target = resolveReturnTarget(returnOrigin, reason, activeTab);
+    setReturnOrigin(null);
+    setKeptTab(null);
+    if (!target.wentBack) return;
+    setActiveTab(target.tab as HeaderTab);
+    setPendingScrollY(returnOrigin?.scrollY ?? null);
+  };
 
   // Load all initial data from server
   const safeJson = async (url: string) => {
@@ -421,7 +488,7 @@ export default function App() {
 
   const handleViewProductTrends = (productId: string) => {
     setSelectedTrendProductId(productId);
-    setActiveTab('trends');
+    goToTab('trends');
   };
 
   /**
@@ -433,7 +500,7 @@ export default function App() {
    */
   const handleInvoiceJump = (target: InvoiceJumpRequest) => {
     setFocusTarget({ ...target, nonce: Date.now() });
-    setActiveTab('invoices');
+    goToTab('invoices');
   };
 
   const handleNormalizeVendors = async () => {
@@ -483,12 +550,29 @@ export default function App() {
   const activeAlertCount = alerts.filter((a) => a.status === 'active').length;
   const reviewItemsCount = stats?.unmappedItemsCount || 0;
 
+  /**
+   * Whether a tab's DOM is kept in the tree.
+   *
+   * The active tab plus, while a jump is in progress, the tab the reader came from. Kept
+   * hidden rather than unmounted, because a tab's filters, search box and half-filled form
+   * live in component state: remounting it would throw away the work the reader is coming
+   * back to. Only one extra tab is ever held, so nothing else is loaded.
+   */
+  const mountsTab = (tab: HeaderTab): boolean => activeTab === tab || keptTab === tab;
+
+  /**
+   * The wrapper's style for a tab. Hidden, not gone: `display: none` keeps the component
+   * and its state alive without reserving any space on the page.
+   */
+  const tabStyle = (tab: HeaderTab): React.CSSProperties | undefined =>
+    activeTab === tab ? undefined : { display: 'none' };
+
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans">
       {/* Top Bar Navigation */}
       <Header
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={chooseTab}
         activeAlertCount={activeAlertCount}
         reviewItemsCount={reviewItemsCount}
         alignmentConflicts={alignmentConflicts}
@@ -518,7 +602,7 @@ export default function App() {
 
           {/* Card 2: Price Alerts */}
           <div
-            onClick={() => setActiveTab('alerts')}
+            onClick={() => chooseTab('alerts')}
             className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-rose-500/50 cursor-pointer transition-colors"
           >
             <div className="flex items-center justify-between">
@@ -542,7 +626,7 @@ export default function App() {
 
           {/* Card 3: Standardized Master Products */}
           <div
-            onClick={() => setActiveTab('catalog')}
+            onClick={() => chooseTab('catalog')}
             className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-blue-500/50 cursor-pointer transition-colors"
           >
             <span className="text-slate-400 block text-[11px] font-mono uppercase tracking-wider">
@@ -590,21 +674,26 @@ export default function App() {
           </div>
         ) : (
           <section>
-            {activeTab === 'invoices' && (
+            {mountsTab('invoices') && (
+              <div style={tabStyle('invoices')}>
               <InvoicesView
                 invoices={invoices}
                 onOpenReviewModal={(invId, it) => {
-                  setActiveTab('catalog');
+                  goToTab('catalog');
                 }}
                 onViewProductTrends={handleViewProductTrends}
                 onOpenScan={() => setIsScanModalOpen(true)}
                 onUpdateLineItem={handleUpdateLineItem}
                 focusTarget={focusTarget}
                 onFocusHandled={() => setFocusTarget(null)}
+                returnOrigin={returnOrigin}
+                onFinishTask={handleReturnFromTask}
               />
+              </div>
             )}
 
-            {activeTab === 'alerts' && (
+            {mountsTab('alerts') && (
+              <div style={tabStyle('alerts')}>
               <PriceAlertsFeed
                 alerts={alerts}
                 onAcknowledge={handleAcknowledgeAlert}
@@ -612,9 +701,11 @@ export default function App() {
                 onViewProductTrends={handleViewProductTrends}
                 onJumpToInvoice={handleInvoiceJump}
               />
+              </div>
             )}
 
-            {activeTab === 'catalog' && (
+            {mountsTab('catalog') && (
+              <div style={tabStyle('catalog')}>
               <MasterCatalogView
                 products={masterProducts}
                 invoices={invoices}
@@ -630,45 +721,54 @@ export default function App() {
                 onJumpToInvoice={handleInvoiceJump}
                 onSetCategory={handleSetCategory}
               />
+              </div>
             )}
 
-            {activeTab === 'alignment' && (
+            {mountsTab('alignment') && (
+              <div style={tabStyle('alignment')}>
               <AlignmentReview
                 onResolved={() => {
                   loadData();
                 }}
                 onJumpToInvoice={handleInvoiceJump}
               />
+              </div>
             )}
 
-            {activeTab === 'vendors' && (
+            {mountsTab('vendors') && (
+              <div style={tabStyle('vendors')}>
               <SuppliersView
                 vendors={vendors}
                 onNormalize={handleNormalizeVendors}
                 onMerge={handleMergeVendors}
                 onRefresh={loadData}
               />
+              </div>
             )}
 
-            {activeTab === 'trends' && (
+            {mountsTab('trends') && (
+              <div style={tabStyle('trends')}>
               <PriceTrendsView
                 products={masterProducts}
                 selectedProductId={selectedTrendProductId}
                 onSelectProduct={setSelectedTrendProductId}
                 onJumpToInvoice={handleInvoiceJump}
               />
+              </div>
             )}
 
-            {activeTab === 'chat' && (
+            {mountsTab('chat') && (
+              <div style={tabStyle('chat')}>
               <AIChatCopilot
                 onNavigateToProduct={(pName) => {
                   const found = masterProducts.find((p) => p.name === pName);
                   if (found) {
                     setSelectedTrendProductId(found.id);
-                    setActiveTab('trends');
+                    goToTab('trends');
                   }
                 }}
               />
+              </div>
             )}
           </section>
         )}
