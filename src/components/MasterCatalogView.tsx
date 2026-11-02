@@ -101,7 +101,6 @@ function quotedPriceOf(
         packSize: item.packSize,
         unit: item.unit,
         unitPrice: item.unitPrice,
-        isMeat: isMeatLine(item),
       });
       if (std.price == null) continue;
       return { price: std.price, unit: std.unit, per: std.sellingUnit };

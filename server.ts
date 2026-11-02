@@ -55,6 +55,13 @@ import {
   LineAlignment,
 } from './src/types/index.ts';
 import { standardPrice } from './src/lib/standardPricing.ts';
+import {
+  normaliseAliasName,
+  planAliasCleanup,
+  planGlobalAliasCleanup,
+  type AliasOwner,
+  type OwnedLine,
+} from './src/lib/vendorAliasAudit.ts';
 import { isMeatDescription } from './src/lib/meatPricing.ts';
 import { UNIT_OPTIONS, type UnitOption } from './src/lib/units.ts';
 import { normalizeVendorName, vendorKey } from './src/lib/vendorNormalizer.ts';
@@ -184,6 +191,64 @@ function refreshProductFromInvoices(productId: string): void {
   db.saveMasterProduct(product);
 }
 
+/**
+ * The lines that still belong to a product - the evidence an alias needs to stay registered.
+ * vendorAliases are created from these lines' rawDescription / supplierSku, so a line is the
+ * only proof of ownership there is.
+ */
+function ownedLinesOf(productId: string): OwnedLine[] {
+  const lines: OwnedLine[] = [];
+  for (const invoice of db.getInvoices()) {
+    for (const item of invoice.items) {
+      if (item.masterProductId !== productId) continue;
+      lines.push({ rawDescription: item.rawDescription, supplierSku: item.supplierSku });
+    }
+  }
+  return lines;
+}
+
+/**
+ * Drops aliases a split has just invalidated on the product the lines came FROM.
+ *
+ * The split endpoint moves the invoice lines and registers their names on the target, but
+ * used to leave the same names on the source. The catalogue search matches on vendorAliases,
+ * so the old card kept turning up for the moved product's name while containing none of its
+ * lines - and the exact-alias matcher could send the next OCR line back to it. Only aliases
+ * with no remaining line behind them are candidates: see planAliasCleanup for the rule.
+ */
+function cleanSplitSourceAliases(
+  sourceId: string,
+  movedLines: OwnedLine[]
+): { removed: string[]; orphaned: string[] } {
+  const product = db.getMasterProduct(sourceId);
+  if (!product) return { removed: [], orphaned: [] };
+
+  const claimedElsewhere = new Set<string>();
+  for (const other of db.getMasterProducts()) {
+    if (other.id === sourceId) continue;
+    for (const a of other.vendorAliases || []) {
+      const name = normaliseAliasName(a.aliasName);
+      if (name) claimedElsewhere.add(name);
+    }
+  }
+
+  const plan = planAliasCleanup(product.vendorAliases || [], ownedLinesOf(sourceId), {
+    transferredNames: movedLines.map((l) => l.rawDescription ?? ''),
+    transferredSkus: movedLines.map((l) => l.supplierSku ?? ''),
+    claimedElsewhere,
+  });
+
+  if (plan.removed.length > 0) {
+    product.vendorAliases = plan.keep;
+    db.saveMasterProduct(product);
+  }
+
+  return {
+    removed: plan.removed.map((r) => r.alias.aliasName),
+    orphaned: plan.orphaned.map((a) => a.aliasName),
+  };
+}
+
 /** Re-judges every line of one invoice against the product it now belongs to. */
 function refreshLineComparisons(invoiceId: string): void {
   const invoice = db.getInvoice(invoiceId);
@@ -229,7 +294,6 @@ function attachStandardPricing(item: InvoiceItem): void {
     packSize: item.packSize,
     unit: item.unit,
     unitPrice: item.unitPrice,
-    isMeat: isMeatDescription(item.rawDescription, item.brand),
   });
   item.standardUnitPrice = std.price;
   item.standardUnit = std.unit;
@@ -1565,6 +1629,17 @@ app.post('/api/catalog/split', (req, res) => {
       db.updateInvoice(invoice.id, invoice);
     }
 
+    // Their names move with the lines. Leaving them on the source makes the old card still
+    // show up in a search for the new product, even though none of its lines are there any
+    // more - and lets a future OCR line match the wrong card at confidence 1.0.
+    const aliasCleanup = cleanSplitSourceAliases(
+      source.id,
+      found.map((f) => ({
+        rawDescription: f.item.rawDescription,
+        supplierSku: f.item.supplierSku,
+      }))
+    );
+
     // Both products are now re-derived from the invoices, so the one that lost these rows
     // stops quoting their prices, and every affected line is re-judged by the rule the
     // upload pipeline uses. No manual history writing: one rebuild, one source of truth.
@@ -1598,6 +1673,8 @@ app.post('/api/catalog/split', (req, res) => {
       target: db.getMasterProduct((target as MasterProduct).id),
       movedLines: found.length,
       alertsMoved,
+      aliasesRemoved: aliasCleanup.removed,
+      aliasesOrphaned: aliasCleanup.orphaned,
       createdNew: !targetProductId,
     });
   } catch (err: any) {
@@ -2708,6 +2785,75 @@ app.post('/api/catalog/recategorize', (req, res) => {
   } catch (err: any) {
     console.error('Recategorise failed:', err);
     res.status(500).json({ error: err.message || 'Recategorise failed' });
+  }
+});
+
+/**
+ * Repairs alias ownership left behind by earlier splits and merges.
+ *
+ * Dry run by default. It only removes a name from a product when exactly one OTHER product
+ * holds that same name AND has an invoice line backing it. Orphans with no competing owner,
+ * and names both cards can back, are reported but never deleted - those need a human.
+ *
+ * Run this once after deploying the split fix: cards split before the fix still carry the
+ * stale alias that makes them appear in a search for the product they no longer own.
+ */
+app.post('/api/catalog/clean-aliases', (req, res) => {
+  try {
+    const apply = req.query.apply === '1' || (req.body || {}).apply === true;
+
+    const products = db.getMasterProducts();
+    const owners: AliasOwner[] = products.map((p) => ({
+      id: p.id,
+      name: p.name,
+      aliases: p.vendorAliases || [],
+    }));
+    const linesByProduct: Record<string, OwnedLine[]> = {};
+    for (const product of products) linesByProduct[product.id] = ownedLinesOf(product.id);
+
+    // The plan is computed ONCE, against the untouched catalogue, so applying it cannot
+    // change who the winner is halfway through the loop.
+    const plan = planGlobalAliasCleanup(owners, linesByProduct);
+
+    const changes = new Map<
+      string,
+      { productId: string; productName: string; removed: string[] }
+    >();
+    for (const removal of plan.removals) {
+      const entry = changes.get(removal.productId) ?? {
+        productId: removal.productId,
+        productName: removal.productName,
+        removed: [],
+      };
+      entry.removed.push(removal.aliasName);
+      changes.set(removal.productId, entry);
+    }
+
+    if (apply) {
+      for (const entry of changes.values()) {
+        const product = db.getMasterProduct(entry.productId);
+        if (!product) continue;
+        const drop = new Set(entry.removed.map(normaliseAliasName));
+        product.vendorAliases = (product.vendorAliases || []).filter(
+          (a) => !drop.has(normaliseAliasName(a.aliasName))
+        );
+        db.saveMasterProduct(product);
+      }
+    }
+
+    const aliasesScanned = owners.reduce((n, o) => n + o.aliases.length, 0);
+    res.json({
+      dryRun: !apply,
+      productsScanned: products.length,
+      aliasesScanned,
+      aliasesRemoved: plan.removals.length,
+      productsChanged: changes.size,
+      ambiguous: plan.ambiguous,
+      changes: [...changes.values()],
+    });
+  } catch (err: any) {
+    console.error('Alias cleanup failed:', err);
+    res.status(500).json({ error: err.message || 'Alias cleanup failed' });
   }
 });
 
