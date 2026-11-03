@@ -18,9 +18,9 @@ function firstNonEmpty(...values: (string | undefined)[]): string | undefined {
 export function resolveProviderId(): ProviderId {
   const raw = (process.env.LLM_PROVIDER || '').trim().toLowerCase();
   if (raw === 'deepseek' || raw === 'gemini') return raw;
-  if (process.env.DEEPSEEK_API_KEY) return 'deepseek';
   if (process.env.GEMINI_API_KEY) return 'gemini';
-  return 'deepseek';
+  if (process.env.DEEPSEEK_API_KEY) return 'deepseek';
+  return 'gemini';
 }
 
 export function resolveDefaultModel(provider: ProviderId, kind: LlmModelKind): string {
@@ -28,7 +28,7 @@ export function resolveDefaultModel(provider: ProviderId, kind: LlmModelKind): s
     // deepseek-flash (V4.1-Flash) is the only DeepSeek model with image input.
     return kind === 'vision' ? 'deepseek-flash' : 'deepseek-flash';
   }
-  return 'gemini-2.5-flash';
+  return 'gemini-flash-latest';
 }
 
 export function resolveModelOverrides(provider: ProviderId, kind: LlmModelKind): string[] {
