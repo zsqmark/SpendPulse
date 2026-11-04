@@ -44,8 +44,10 @@ export function resolveDefaultModel(provider: ProviderId, kind: LlmModelKind): s
     return kind === 'vision' ? 'deepseek-flash' : 'deepseek-flash';
   }
   if (provider === 'hunyuan') {
-    // hunyuan-vision-latest is the multimodal reader; turbos is the text flagship.
-    return kind === 'vision' ? 'hunyuan-vision-latest' : 'hunyuan-turbos-latest';
+    // TokenHub names: hy-vision-2.0-instruct reads images, hy4 is the text flagship.
+    // (glm-5v-turbo also reads images but is pre-offline; the legacy Hunyuan platform's
+    // hunyuan-vision-latest / hunyuan-turbos-latest do not exist on TokenHub.)
+    return kind === 'vision' ? 'hy-vision-2.0-instruct' : 'hy4';
   }
   return 'gemini-flash-latest';
 }

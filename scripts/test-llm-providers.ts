@@ -6,7 +6,7 @@
  * The rule that matters: the server default keeps working exactly as before, an explicit
  * per-request choice wins, a provider without its API key is still buildable (so the error
  * comes from the provider itself with a clear message), and Hunyuan's default models are
- * the vision reader for images and turbos for text.
+ * hy-vision-2.0-instruct for images and hy4 for text.
  */
 
 import {
@@ -87,11 +87,11 @@ withEnv({ HUNYUAN_API_KEY: 'h-1' }, () => {
 console.log('\nDefault models and override chains');
 
 withEnv({}, () => {
-  check('hunyuan vision reads with hunyuan-vision-latest', resolveDefaultModel('hunyuan', 'vision') === 'hunyuan-vision-latest');
-  check('hunyuan text defaults to hunyuan-turbos-latest', resolveDefaultModel('hunyuan', 'text') === 'hunyuan-turbos-latest');
+  check('hunyuan vision reads with hy-vision-2.0-instruct', resolveDefaultModel('hunyuan', 'vision') === 'hy-vision-2.0-instruct');
+  check('hunyuan text defaults to hy4', resolveDefaultModel('hunyuan', 'text') === 'hy4');
   check(
     'hunyuan vision honours HUNYUAN_VISION_MODEL',
-    resolveModelOverrides('hunyuan', 'vision')[0] === 'hunyuan-vision-latest'
+    resolveModelOverrides('hunyuan', 'vision')[0] === 'hy-vision-2.0-instruct'
   );
 });
 

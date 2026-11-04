@@ -1,22 +1,28 @@
 /**
- * Tencent Hunyuan, spoken to through its OpenAI-compatible Chat Completions endpoint.
+ * Tencent Hunyuan, spoken to through an OpenAI-compatible Chat Completions endpoint.
  *
- *   - base URL  https://api.hunyuan.cloud.tencent.com/v1
- *   - auth      Authorization: Bearer <HUNYUAN_API_KEY> (created in the Hunyuan console)
- *   - models    hunyuan-turbos-latest (text), hunyuan-vision-latest (images)
+ * Default endpoint is TokenHub - Tencent's unified model platform and where new Hunyuan
+ * accounts are provisioned (the legacy Hunyuan-only platform no longer sells to new users):
+ *
+ *   - base URL  https://tokenhub.tencentmaas.com/v1
+ *   - auth      Authorization: Bearer <HUNYUAN_API_KEY> (TokenHub console -> API Key)
+ *   - models    hy-vision-2.0-instruct (images), hy4 (text); hy3 / hunyuan-t1-vision-20250916
+ *               make good fallbacks. Accounts still on the LEGACY Hunyuan platform set
+ *               HUNYUAN_BASE_URL=https://api.hunyuan.cloud.tencent.com/v1 and the
+ *               HUNYUAN_(VISION|TEXT)_MODEL overrides instead.
  *
  * Deliberately a sibling of deepseekProvider rather than a shared base class: the two
- * differ in the small, important ways (Hunyuan has no `thinking` switch, and its JSON mode
- * is not advertised, so JSON is enforced by prompt only - parseJsonLoose already tolerates
- * the prose fences that produces).
+ * differ in the small, important ways (TokenHub models have no `thinking` switch, and
+ * JSON mode is not advertised, so JSON is enforced by prompt only - parseJsonLoose already
+ * tolerates the prose fences that produces).
  *
- * Like DeepSeek, Hunyuan accepts JPEG/PNG/GIF/WebP images only - PDFs must be rasterised
- * by the browser before upload (capabilities.pdfNative = false).
+ * Like DeepSeek, these endpoints accept JPEG/PNG/GIF/WebP images only - PDFs must be
+ * rasterised by the browser before upload (capabilities.pdfNative = false).
  */
 import type { LlmMessage, LlmModelKind, LlmPart, LlmProvider, LlmRequest } from './types.ts';
 import { resolveDefaultModel, resolveModelOverrides } from './config.ts';
 
-const DEFAULT_BASE_URL = 'https://api.hunyuan.cloud.tencent.com/v1';
+const DEFAULT_BASE_URL = 'https://tokenhub.tencentmaas.com/v1';
 const REQUEST_TIMEOUT_MS = 180_000;
 
 function baseUrl(): string {
