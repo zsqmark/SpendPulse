@@ -18,8 +18,19 @@ export interface LlmMessage {
 /** Which capability class the caller needs - drives default model selection. */
 export type LlmModelKind = 'vision' | 'text';
 
+/**
+ * The AI backends this app can talk to. Declared here (not in config.ts) because a request
+ * carries its own choice, and types.ts must not import from config.ts.
+ */
+export type ProviderId = 'deepseek' | 'gemini' | 'hunyuan';
+
 export interface LlmRequest {
   messages: LlmMessage[];
+  /**
+   * Which AI to use for THIS call. Absent = the server default (LLM_PROVIDER / key
+   * presence). The scan dialog sets it so the owner can pick the reader per upload.
+   */
+  provider?: ProviderId;
   /** Explicit model id override (skips kind-based default). */
   model?: string;
   modelKind?: LlmModelKind;
@@ -38,7 +49,7 @@ export interface LlmProviderCapabilities {
 }
 
 export interface LlmProvider {
-  id: 'deepseek' | 'gemini';
+  id: ProviderId;
   capabilities: LlmProviderCapabilities;
   /** Ordered list of models to try (first = primary, rest = fallbacks). */
   resolveModels(kind: LlmModelKind): string[];

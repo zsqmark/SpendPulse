@@ -5,6 +5,7 @@ import {
   parseJsonLoose,
   providerSupportsPdf,
   type LlmMessage,
+  type ProviderId,
 } from './llm/index.ts';
 import { lineMergeKey } from './aliasMatcher.ts';
 import { PDFDocument } from 'pdf-lib';
@@ -263,6 +264,11 @@ export async function splitPdfIfNeeded(
 /**
  * Targeted continuation extractor for any page that was skipped in the first multi-page pass
  */
+/** The AI a scan runs on - chosen in the UI before OCR starts, absent = server default. */
+export interface ProviderChoice {
+  provider?: ProviderId;
+}
+
 async function extractSinglePageContinuation(params: {
   pageData: string;
   mimeType: string;
@@ -270,8 +276,8 @@ async function extractSinglePageContinuation(params: {
   totalPages: number;
   vendorName?: string;
   invoiceNumber?: string;
-}): Promise<ExtractedInvoiceItem[]> {
-  const { pageData, mimeType, pageNumber, totalPages, vendorName, invoiceNumber } = params;
+} & ProviderChoice): Promise<ExtractedInvoiceItem[]> {
+  const { pageData, mimeType, pageNumber, totalPages, vendorName, invoiceNumber, provider } = params;
 
   const prompt = `
 Extract ALL invoice line items from this CONTINUATION PAGE (Page ${pageNumber} of ${totalPages})
@@ -333,6 +339,7 @@ For each item row:
   try {
     const raw = await generateText({
       messages,
+      provider,
       modelKind: 'vision',
       maxOutputTokens: 8192,
       json: { schema: continuationSchema, name: 'continuation_items' },
@@ -374,8 +381,8 @@ export async function extractInvoiceData(params: {
   textPayload?: string;
   fileName?: string;
   pages?: DocumentPage[];
-}): Promise<ExtractedInvoiceResult> {
-  let { base64Data, mimeType, textPayload, fileName, pages } = params;
+} & ProviderChoice): Promise<ExtractedInvoiceResult> {
+  let { base64Data, mimeType, textPayload, fileName, pages, provider } = params;
 
   const PDF_NOT_SUPPORTED_MSG =
     'This AI provider reads images only, not PDFs. Upload through the web UI, which converts each PDF page to an image before scanning.';
@@ -383,7 +390,7 @@ export async function extractInvoiceData(params: {
   // 1. Prepare pages. For image-only providers the client must rasterise PDFs first;
   //    server-side PDF rendering is intentionally not supported (unstable in Node).
   if ((!pages || pages.length === 0) && base64Data && mimeType === 'application/pdf') {
-    if (!providerSupportsPdf()) {
+    if (!providerSupportsPdf({ provider })) {
       throw new Error(PDF_NOT_SUPPORTED_MSG);
     }
     pages = await splitPdfIfNeeded(base64Data, fileName);
@@ -396,7 +403,10 @@ export async function extractInvoiceData(params: {
       ? [{ base64Data, mimeType, fileName: fileName || 'document', pageNumber: 1, totalPages: 1 }]
       : [];
 
-  if (!providerSupportsPdf() && effectivePages.some((p) => p.mimeType === 'application/pdf')) {
+  if (
+    !providerSupportsPdf({ provider }) &&
+    effectivePages.some((p) => p.mimeType === 'application/pdf')
+  ) {
     throw new Error(PDF_NOT_SUPPORTED_MSG);
   }
 
@@ -586,10 +596,11 @@ Rules:
 
     try {
     console.log(
-      `[OCR] Calling ${activeProviderId()} vision model for file: ${fileName} (chunk ${chunkIndex + 1}/${chunkTotal}, ${chunk.length} page(s))...`
+      `[OCR] Calling ${activeProviderId({ provider })} vision model for file: ${fileName} (chunk ${chunkIndex + 1}/${chunkTotal}, ${chunk.length} page(s))...`
     );
     const raw = await generateText({
       messages,
+      provider,
       modelKind: 'vision',
       maxOutputTokens: OCR_MAX_OUTPUT_TOKENS,
       json: { schema: responseSchema, name: 'invoice_extraction' },
@@ -655,6 +666,7 @@ Rules:
               totalPages: totalPagesCount,
               vendorName: parsed.vendorName,
               invoiceNumber: parsed.invoiceNumber,
+              provider,
             });
             if (recovered.length > 0) {
               console.log(`[OCR] Recovered ${recovered.length} items from Page ${missNum}!`);
@@ -835,7 +847,8 @@ const SEGMENT_PAGES_PER_REQUEST = Number(process.env.OCR_SEGMENT_PAGES_PER_REQUE
 async function segmentWindowIntoGroups(
   window: DocumentPage[],
   offset: number,
-  totalPages: number
+  totalPages: number,
+  provider?: ProviderId
 ): Promise<number[][] | null> {
   const parts: LlmMessage['parts'] = [
     {
@@ -873,6 +886,7 @@ Each page is labelled with its number in the ORIGINAL document. Return JSON with
   try {
     const raw = await generateText({
       messages: [{ role: 'user', parts }],
+      provider,
       modelKind: 'vision',
       maxOutputTokens: 2048,
       json: { schema, name: 'invoice_segmentation' },
@@ -898,7 +912,8 @@ Each page is labelled with its number in the ORIGINAL document. Return JSON with
 }
 
 export async function segmentPagesIntoInvoices(
-  pages: DocumentPage[]
+  pages: DocumentPage[],
+  provider?: ProviderId
 ): Promise<DocumentPage[][]> {
   if (!pages || pages.length <= 1) {
     return [pages || []];
@@ -934,7 +949,7 @@ export async function segmentPagesIntoInvoices(
   const used = new Set<number>();
 
   for (const win of windows) {
-    const winGroups = await segmentWindowIntoGroups(win.pages, win.start, total);
+    const winGroups = await segmentWindowIntoGroups(win.pages, win.start, total, provider);
     if (!winGroups) {
       // One unusable window means the boundaries cannot be trusted - collapse to a single
       // invoice rather than invent a split across a gap.
@@ -992,13 +1007,14 @@ export async function extractInvoicesFromDocument(params: {
   textPayload?: string;
   fileName?: string;
   pages?: DocumentPage[];
-}): Promise<{ result: ExtractedInvoiceResult; pages: DocumentPage[] }[]> {
+} & ProviderChoice): Promise<{ result: ExtractedInvoiceResult; pages: DocumentPage[] }[]> {
+  const { provider } = params;
   // The normal Scan dialog path hands us rasterised page-images - segment those.
   if (params.pages && params.pages.length > 0) {
-    const groups = await segmentPagesIntoInvoices(params.pages);
+    const groups = await segmentPagesIntoInvoices(params.pages, provider);
     const out: { result: ExtractedInvoiceResult; pages: DocumentPage[] }[] = [];
     for (const group of groups) {
-      const result = await extractInvoiceData({ pages: group, fileName: params.fileName });
+      const result = await extractInvoiceData({ pages: group, fileName: params.fileName, provider });
       result.pageCount = group.length;
       out.push({ result, pages: group });
     }

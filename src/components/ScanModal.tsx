@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Scan,
   Upload,
@@ -11,6 +11,7 @@ import {
   Trash2,
   Layers,
   CopyCheck,
+  Cpu,
 } from 'lucide-react';
 import { rasterizePdfToPages } from '../lib/pdfRasterize.ts';
 import { apiUrl } from '../lib/apiBase.ts';
@@ -21,6 +22,24 @@ interface ScanModalProps {
   isOpen: boolean;
   onClose: () => void;
   onInvoiceIngested: () => void;
+}
+
+/** What /api/llm/providers reports. `available` means the key is on the server - the key itself never leaves it. */
+interface ProviderOption {
+  id: string;
+  available: boolean;
+  pdfNative: boolean;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  deepseek: 'DeepSeek',
+  gemini: 'Gemini',
+  hunyuan: '混元 Hunyuan',
+};
+
+/** The name the progress line quotes while scanning. */
+function readerLabel(providerId: string): string {
+  return PROVIDER_LABELS[providerId] ?? 'the server default AI';
 }
 
 interface PageItem {
@@ -41,6 +60,26 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
   const [extractedResult, setExtractedResult] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSplittingPdf, setIsSplittingPdf] = useState(false);
+  /** The AI this scan will use. Empty = the server default (LLM_PROVIDER / key presence). */
+  const [selectedProvider, setSelectedProvider] = useState<string>('');
+  const [providerOptions, setProviderOptions] = useState<ProviderOption[]>([]);
+
+  // Fetched every time the dialog opens, so a key added on the server shows up without a reload.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    fetch(apiUrl('/api/llm/providers'))
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled) setProviderOptions(Array.isArray(d?.providers) ? d.providers : []);
+      })
+      .catch(() => {
+        if (!cancelled) setProviderOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
 
   const handleFilesAdded = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
@@ -57,7 +96,9 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
         setIsSplittingPdf(true);
         setCurrentStep(`Rendering PDF pages locally: ${file.name}...`);
         try {
-          // DeepSeek reads images only, so every page is rasterised here in the browser.
+          // The vision providers read images, not PDFs, so every page is rasterised here
+          // in the browser - this also keeps the page previews the user sees identical
+          // to what the model is sent.
           const rendered = await rasterizePdfToPages(file, file.name);
           const baseName = file.name.replace(/\.pdf$/i, '');
           console.log(`[ScanModal] Rendered ${rendered.length} page(s) from ${file.name}`);
@@ -121,7 +162,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
     setExtractedResult(null);
 
     try {
-      setCurrentStep(`Preparing ${pages.length} document page(s) for DeepSeek Vision...`);
+      setCurrentStep(`Preparing ${pages.length} document page(s) for ${readerLabel(selectedProvider)}...`);
 
       // Convert any pending page files to base64
       const encodedPages: {
@@ -190,10 +231,10 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
 
         setCurrentStep(
           docOrder.length > 1
-            ? `Scanning document ${d + 1} of ${docOrder.length}: ${docName} (${docPages.length} page(s))...`
+            ? `Scanning document ${d + 1} of ${docOrder.length}: ${docName} (${docPages.length} page(s)) via ${readerLabel(selectedProvider)}...`
             : docPages.length > 1
-            ? `Scanning all line items across Page 1 to Page ${docPages.length} via DeepSeek Vision...`
-            : 'Scanning invoice document via DeepSeek Vision...'
+            ? `Scanning all line items across Page 1 to Page ${docPages.length} via ${readerLabel(selectedProvider)}...`
+            : `Scanning invoice document via ${readerLabel(selectedProvider)}...`
         );
 
         // Renumber pages per document so page numbers stay meaningful.
@@ -204,6 +245,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
             fileName: docName,
             pages: docPages.map((p, idx) => ({ ...p, pageNumber: idx + 1, totalPages: docPages.length })),
             isScannedManual: true,
+            provider: selectedProvider || undefined,
           }),
         });
 
@@ -343,6 +385,56 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
                 </label>
               </div>
 
+              {/* AI Reader - chosen BEFORE the scan so the owner knows who is reading */}
+              <div className="border border-slate-800 rounded-lg bg-slate-950/70 p-3 space-y-2">
+                <div className="flex items-center justify-between text-xs font-mono">
+                  <span className="text-slate-300 font-semibold flex items-center gap-1.5">
+                    <Cpu className="w-3.5 h-3.5 text-blue-400" />
+                    AI Reader
+                  </span>
+                  {selectedProvider ? (
+                    <button
+                      onClick={() => setSelectedProvider('')}
+                      className="text-[11px] text-slate-500 hover:text-slate-300 transition-colors"
+                    >
+                      Use server default
+                    </button>
+                  ) : (
+                    <span className="text-[10px] text-slate-500">server default</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {['deepseek', 'gemini', 'hunyuan'].map((id) => {
+                    const info = providerOptions.find((o) => o.id === id);
+                    const selected = selectedProvider === id;
+                    // An unconfigured reader can still be offered - the server answers with a
+                    // clear "no API key" error instead of silently falling back to another AI.
+                    const noKey = info ? !info.available : false;
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => setSelectedProvider(selected ? '' : id)}
+                        title={noKey ? 'No API key on the server yet' : undefined}
+                        className={`py-1.5 px-2 rounded border text-[11px] font-mono transition-colors ${
+                          selected
+                            ? 'border-blue-500 bg-blue-950/60 text-blue-200'
+                            : 'border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-600'
+                        }`}
+                      >
+                        <span className="block truncate">{PROVIDER_LABELS[id] ?? id}</span>
+                        <span
+                          className={`block text-[9px] ${
+                            noKey ? 'text-amber-500/80' : selected ? 'text-emerald-400' : 'text-slate-500'
+                          }`}
+                        >
+                          {noKey ? 'no key' : 'ready'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               {/* Uploaded Pages List */}
               {pages.length > 0 && (
                 <div className="border border-slate-800 rounded-lg bg-slate-950/70 p-3 space-y-2">
@@ -465,7 +557,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ isOpen, onClose, onInvoice
                   <div className="py-16 text-center space-y-2">
                     <Loader2 className="w-6 h-6 animate-spin text-blue-400 mx-auto" />
                     <p className="text-xs text-slate-300 font-mono">
-                      Extracting line items across Page 1, Page 2, Page 3+ via DeepSeek Vision...
+                      Extracting line items across Page 1, Page 2, Page 3+ via {readerLabel(selectedProvider)}...
                     </p>
                   </div>
                 )}

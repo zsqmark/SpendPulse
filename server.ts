@@ -5,6 +5,11 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { db } from './src/server/storage.ts';
 import { mergeDuplicateLineItems, extractInvoicesFromDocument } from './src/server/ocrService.ts';
+import {
+  isProviderConfigured,
+  resolveProviderId,
+  type ProviderId,
+} from './src/server/llm/index.ts';
 import { batchMatchItems, guessCategory } from './src/server/aliasMatcher.ts';
 import { CATEGORY_OPTIONS, isKnownCategory, normaliseCategory } from './src/lib/categories.ts';
 import {
@@ -637,15 +642,53 @@ app.get('/api/invoices/:id/pages/:pageNumber', async (req, res) => {
 });
 
 // 3. Process Invoice (OCR + Alias Canonicalization + Price Alert Detection)
+/**
+ * Which AI can read invoices, and whether its key is on the server. The scan dialog calls
+ * this before every scan so the picker only offers readers that will actually work; keys
+ * are never echoed back, only their presence.
+ */
+app.get('/api/llm/providers', (req, res) => {
+  const providers = (['deepseek', 'gemini', 'hunyuan'] as ProviderId[]).map((id) => ({
+    id,
+    available: isProviderConfigured(id),
+    pdfNative: id === 'gemini',
+  }));
+  res.json({ providers, default: resolveProviderId() });
+});
+
 app.post('/api/invoices/process', async (req, res) => {
   try {
-    const { fileName, base64Data, mimeType, textPayload, isScannedManual, pages } = req.body;
+    const { fileName, base64Data, mimeType, textPayload, isScannedManual, pages, provider } =
+      req.body;
 
     if (!fileName && !base64Data && !textPayload && (!pages || pages.length === 0)) {
       return res.status(400).json({ error: 'Missing document or text content' });
     }
 
-    console.log(`Processing invoice: ${fileName || 'unnamed'} (${pages ? `${pages.length} pages` : 'single binary'})`);
+    // The scan dialog lets the owner pick the reader before OCR starts. An unknown name is
+    // refused here rather than silently falling back - a scan that runs on the wrong AI
+    // looks exactly like a scan that ran on the chosen one.
+    let requestedProvider: ProviderId | undefined;
+    if (provider !== undefined && provider !== null && String(provider).trim() !== '') {
+      const candidate = String(provider).trim().toLowerCase();
+      if (candidate !== 'deepseek' && candidate !== 'gemini' && candidate !== 'hunyuan') {
+        return res.status(400).json({
+          error: `Unknown AI provider "${provider}". Use deepseek, gemini or hunyuan.`,
+        });
+      }
+      if (!isProviderConfigured(candidate)) {
+        return res.status(400).json({
+          error: `No API key configured for "${candidate}". Add it on the server (.env.local) first.`,
+        });
+      }
+      requestedProvider = candidate;
+    }
+
+    console.log(
+      `Processing invoice: ${fileName || 'unnamed'} (${pages ? `${pages.length} pages` : 'single binary'}${
+        requestedProvider ? `, AI: ${requestedProvider}` : ''
+      })`
+    );
 
     // Guard 1: identical file content - caught before any OCR is paid for.
     const incomingPages =
@@ -674,6 +717,7 @@ app.post('/api/invoices/process', async (req, res) => {
       textPayload,
       fileName,
       pages,
+      provider: requestedProvider,
     });
 
     const invoices: Invoice[] = [];

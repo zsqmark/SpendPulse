@@ -1,16 +1,31 @@
 import { getProvider } from './config.ts';
-import type { LlmModelKind, LlmRequest } from './types.ts';
+import type { LlmModelKind, LlmProvider, LlmRequest } from './types.ts';
 
 export * from './types.ts';
-export { getProvider, resolveProviderId, resetProviderCache } from './config.ts';
+export {
+  getProvider,
+  isProviderConfigured,
+  resolveDefaultModel,
+  resolveModelOverrides,
+  resolveProviderId,
+  resetProviderCache,
+} from './config.ts';
 
-/** True when the active provider can ingest application/pdf without rasterisation. */
-export function providerSupportsPdf(): boolean {
-  return getProvider().capabilities.pdfNative;
+/**
+ * The provider a request runs on: the one named on the request when the caller chose one
+ * (the scan dialog does), otherwise the server default.
+ */
+function providerFor(request: Pick<LlmRequest, 'provider'>): LlmProvider {
+  return getProvider(request.provider);
 }
 
-export function activeProviderId(): string {
-  return getProvider().id;
+/** True when the provider a request targets can ingest application/pdf without rasterisation. */
+export function providerSupportsPdf(request?: Pick<LlmRequest, 'provider'>): boolean {
+  return providerFor(request ?? {}).capabilities.pdfNative;
+}
+
+export function activeProviderId(request?: Pick<LlmRequest, 'provider'>): string {
+  return providerFor(request ?? {}).id;
 }
 
 /**
@@ -18,7 +33,7 @@ export function activeProviderId(): string {
  * Throws the last error if every model fails.
  */
 export async function generateText(request: LlmRequest): Promise<string> {
-  const provider = getProvider();
+  const provider = providerFor(request);
   const kind: LlmModelKind = request.modelKind ?? 'text';
   const models = request.model ? [request.model] : provider.resolveModels(kind);
 
